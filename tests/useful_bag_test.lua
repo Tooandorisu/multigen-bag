@@ -6,8 +6,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local T = require("tests.modkit")
-local Data = require("src.core.Data")
-Data:load()
+local Data = T.fixtures.fresh()
 
 local run = T.sdk.loadMod("mods/useful_bag", { data = Data })
 T.eq(#run.errors, 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
@@ -30,6 +29,28 @@ T.eq(Bag.slots(save), 21, "bag holds 21 distinct items")
 
 local ex = run.loader.exports.useful_bag
 T.neq(ex, nil, "exports reachable")
+local Runtime = require("src.mods.Runtime")
+T.eq(#(run.mod.manifest.optional_dependencies or {}), 0,
+  "the mod has no UI companion dependency")
+T.check(Runtime.wantsHook("screen.render_visible"),
+  "standalone presenter hides the native bag draw")
+T.check(Runtime.wantsHook("render.compose"),
+  "standalone presenter clears the native UI canvas")
+T.check(Runtime.wantsHook("render.hud"),
+  "standalone presenter draws after the game frame")
+T.eq(ex.integerScale(640, 480), 1, "base viewport uses 1x integer scaling")
+T.eq(ex.integerScale(1280, 960), 2, "2x viewport uses 2x integer scaling")
+T.eq(ex.integerScale(1920, 1080), 2, "wide viewport uses the limiting dimension")
+T.eq(ex.integerScale(2048, 1536), 3, "3x viewport uses 3x integer scaling")
+T.eq(ex.fontScale(320, 240), 1, "tiny viewport keeps a fitting font scale")
+T.eq(ex.fontScale(640, 480), 2, "small window gets readable 2x text")
+T.eq(ex.fontScale(800, 600), 2, "window-sized viewport keeps readable 2x text")
+T.eq(ex.fontScale(2048, 1536), 3, "large viewport caps at 3x text")
+T.eq(ex.fontSize(16), 15, "Plain Pixel snaps a small font to its design em")
+T.eq(ex.fontSize(48), 45, "Plain Pixel snaps a scaled font to its design em")
+T.eq(ex.headerHeight(120, 24), 138,
+  "header clearance uses a compact divider gap")
+T.eq(ex.titleSize(2), 45, "header uses a smaller grid-snapped font")
 
 -- seed item defs so classify has names + flags to read; the fixture only
 -- carries one of each seam (FIX_POTION/FIX_BALL/FIX_TM/FIX_BADGE)
@@ -332,6 +353,12 @@ deposit.onSelectKey(deposit.items[3], deposit) -- swap with POKE_BALL
 T.eq(table.concat(stubDep.save.bagOrder, ","), "POKE_BALL,POTION,REPEL",
   "deposit swap writes save.bagOrder (the bag)")
 T.eq(deposit.items[1].value, "POKE_BALL", "deposit rows reordered after the swap")
+stubDep.stack = stack
+stack:push(deposit)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, deposit), false,
+  "the fullscreen presenter hides the native deposit list")
+stack:pop()
 
 -- A also completes a pending swap instead of starting the action
 local onChooseCalled = false
@@ -393,6 +420,15 @@ local withdrawTm = ListMenu.new(stubTm, "WITHDRAW ITEM", {
 })
 T.eq(withdrawTm.items[1].label, "FIX TM01 FIX CUT",
   "the PC row shows the full TM name")
+T.eq(ex.footerText("COIN CASE was\nstored via PC."),
+  "COIN CASE was stored via PC.",
+  "PC feedback is flattened into one fullscreen footer line")
+stubTm.stack = stack
+stack:push(withdrawTm)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, withdrawTm), false,
+  "the fullscreen presenter hides the native withdraw list")
+stack:pop()
 
 -- ticker geometry: labels that fit stay static, wide ones scroll
 T.eq(ex.tickerFor("FIX POTION", "x1"), nil,
@@ -431,6 +467,17 @@ T.eq(withdrawTm.items[1].move, "FIX CUT",
 -- the bag row carries the same split
 T.eq(tmBag.items[1].move, "FIX CUT",
   "the bag row carries the move name too")
+
+-- ---------------------------------- standalone presenter seam
+stack:push(tmBag)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, tmBag), false, "standalone presenter hides the native bag draw")
+local hudOk = pcall(function()
+  Runtime.call("render.hud", function() end, stub,
+    { width = 640, height = 576 })
+end)
+T.check(hudOk, "standalone presenter draws the fullscreen bag")
+stack:pop()
 
 -- pacing: hold at the head, scroll out, hold, scroll back
 local to = ex.tickerOffset

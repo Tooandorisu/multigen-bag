@@ -1,5 +1,54 @@
 # Changelog
 
+## [2.4.7] - 2026-08-21
+
+### Fixed
+
+- Flattened PC deposit/withdraw feedback messages into one line in the
+  fullscreen footer so they do not cross the footer boundary.
+
+## [2.4.6] - 2026-08-21
+
+### Changed
+
+- PC WITHDRAW ITEM and DEPOSIT ITEM now use the same standalone fullscreen
+  list presenter as the bag, while retaining their PC ordering and SELECT-swap
+  behavior.
+
+## [2.4.5] - 2026-08-21
+
+### Fixed
+
+- Reduced the header font size and compacted the gap before its divider so
+  large pocket titles no longer dominate or crowd the first row.
+
+## [2.4.4] - 2026-08-21
+
+### Fixed
+
+- Increased text sizing in smaller windows and snapped the standalone Plain
+  Pixel font to its native 15 px design grid to keep strokes readable and
+  crisp. Header spacing now follows the font's actual line height so the
+  divider cannot overlap the title.
+
+## [2.4.3] - 2026-08-21
+
+### Fixed
+
+- Replaced the optional Gen1 Modern UI integration with Useful Bag's own
+  fullscreen presenter. The mod now renders its headers, pocket rows, money,
+  and TM/HM ticker without requiring another mod.
+
+## [2.4.2] - 2026-08-21
+
+### Fixed
+
+- Registered the bag with Gen1 Modern UI so supported installs replace the
+  classic 160x144 list with the fullscreen presenter, including its title,
+  footer, and money display.
+- Kept machine move metadata in the public presentation model so TM/HM names
+  remain readable when the modern presenter is active.
+
 ## [2.4.1] - 2026-08-06
 
 ### Fixed

@@ -436,6 +436,8 @@ end
 -- opens on BATTLE ITEMS and skips the unusable pockets when cycling.
 local function decorate(list, game, session, opts)
   -- pocket view starts on ITEMS
+  session.game = game
+  list.__usefulBagKind = "bag"
   list.__pocketIndex = 1
   list.wrap = true -- Up on the first / Down on the last item wraps
   list.__battle = opts and opts.battle or nil -- battle bags cycle tighter
@@ -551,7 +553,10 @@ local function decorate(list, game, session, opts)
 
   local vanillaClose = list.close
   list.close = function(self, ...)
-    if session.active == self then session.active = nil end
+    if session.active == self then
+      session.active = nil
+      session.game = nil
+    end
     return vanillaClose(self, ...)
   end
 
@@ -586,7 +591,10 @@ end
 -- alphabetical sort) so a reorder persists visibly across reopening.
 local PC_LISTS = { ["WITHDRAW ITEM"] = true, ["DEPOSIT ITEM"] = true, ["TOSS ITEM"] = true }
 
-local function decoratePcList(list, game)
+local function decoratePcList(list, game, session)
+  session.game = game
+  session.active = list
+  list.__usefulBagKind = "pc"
   local order = list.title == "DEPOSIT ITEM"
     and Bag.order(game.save)   -- the deposit list shows the bag
     or pcOrder(game.save)      -- withdraw / toss show the PC storage
@@ -628,6 +636,293 @@ local function decoratePcList(list, game)
   end
 end
 
+-- ------------------------------------------------ standalone presentation
+
+-- Useful Bag owns its presentation so it does not need a companion UI mod.
+-- The engine keeps ListMenu as the input/state owner; these hooks only hide
+-- its 160x144 draw and paint the current bag state after the normal frame.
+local standaloneFonts = {}
+local STANDALONE_BASE_WIDTH = 640
+local STANDALONE_BASE_HEIGHT = 480
+local STANDALONE_TEXT_BASE_WIDTH = 320
+local STANDALONE_TEXT_BASE_HEIGHT = 240
+local STANDALONE_TEXT_MAX_SCALE = 3
+
+local function standaloneScale(width, height)
+  return math.max(1, math.floor(math.min(
+    width / STANDALONE_BASE_WIDTH, height / STANDALONE_BASE_HEIGHT)))
+end
+
+local function standaloneTextScale(width, height)
+  return math.max(1, math.min(STANDALONE_TEXT_MAX_SCALE, math.floor(math.min(
+    width / STANDALONE_TEXT_BASE_WIDTH,
+    height / STANDALONE_TEXT_BASE_HEIGHT))))
+end
+
+local function standaloneClamp(value, lo, hi)
+  return math.max(lo, math.min(hi, value))
+end
+
+local function standalonePixel(value)
+  return math.floor(value + 0.5)
+end
+
+local function standaloneFontSize(size)
+  local Font = require("src.render.Font")
+  local em = Font.PLAINPIXEL_SIZE or 15
+  return math.max(em, math.floor(size / em + 0.5) * em)
+end
+
+local function standaloneFont(size)
+  size = standaloneFontSize(size)
+  if standaloneFonts[size] then return standaloneFonts[size] end
+  local Font = require("src.render.Font")
+  local ok, font = pcall(love.graphics.newFont, Font.PLAINPIXEL, size,
+    "mono", 1)
+  if not ok or not font then font = love.graphics.newFont(size) end
+  if font.setFilter then font:setFilter("nearest", "nearest") end
+  standaloneFonts[size] = font
+  return font
+end
+
+local function standaloneTitleSize(textScale)
+  return standaloneFontSize(20 * textScale)
+end
+
+local function standaloneFooterText(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("[\r\n]+", " "))
+end
+
+local function standaloneHeaderGap(pad)
+  return math.max(2, standalonePixel(pad * 0.5))
+end
+
+local function standaloneDividerGap(pad)
+  return math.max(1, standalonePixel(pad * 0.25))
+end
+
+local function standaloneHeaderHeight(titleHeight, pad)
+  return standaloneHeaderGap(pad) + standalonePixel(titleHeight)
+    + standaloneDividerGap(pad)
+end
+
+local function standaloneTickerOffset(time, overflow, speed)
+  if overflow <= 0 then return 0 end
+  local hold = 1.25
+  local travel = overflow / speed
+  local cycle = hold * 2 + travel * 2
+  local position = time % cycle
+  if position < hold then return 0 end
+  position = position - hold
+  if position < travel then return -math.floor(position * speed + 0.5) end
+  position = position - travel
+  if position < hold then return -overflow end
+  return -overflow + math.floor((position - hold) * speed + 0.5)
+end
+
+local function standaloneViewport(viewport)
+  if viewport and viewport.safe then
+    local safe = viewport.safe
+    return safe.x or 0, safe.y or 0,
+      math.max(1, safe.width or viewport.width or 1),
+      math.max(1, safe.height or viewport.height or 1)
+  end
+  local width = viewport and viewport.width or love.graphics.getWidth()
+  local height = viewport and viewport.height or love.graphics.getHeight()
+  return 0, 0, math.max(1, width), math.max(1, height)
+end
+
+local function standaloneDrawText(font, text, x, y, color)
+  love.graphics.setFont(font)
+  love.graphics.setColor(color[1], color[2], color[3], color[4] or 1)
+  love.graphics.print(tostring(text or ""), x, y)
+end
+
+local function standaloneDrawBag(game, viewport, list)
+  local G = love.graphics
+  local vx, vy, vw, vh = standaloneViewport(viewport)
+  local scale = standaloneScale(vw, vh)
+  local textScale = standaloneTextScale(vw, vh)
+  local margin = 8 * scale
+  local px, py = vx + margin, vy + margin
+  local panelW, panelH = vw - margin * 2, vh - margin * 2
+  local pad = 12 * textScale
+  local titleSize = standaloneTitleSize(textScale)
+  local bodySize = 15 * textScale
+  local footerScale = math.max(1, math.floor(textScale * 2 / 3 + 0.5))
+  local footerSize = 15 * footerScale
+  local titleFont, bodyFont, footerFont = standaloneFont(titleSize),
+    standaloneFont(bodySize), standaloneFont(footerSize)
+  local titleGap = standaloneHeaderGap(pad)
+  local headerH = standaloneHeaderHeight(titleFont:getHeight(), pad)
+  local footerH = standalonePixel(footerFont:getHeight()) + pad
+  local rowH = 24 * textScale
+  local availableH = math.max(rowH, panelH - headerH - footerH - pad)
+  local visible = math.max(1, math.floor(availableH / rowH))
+  local count = #list.items
+  local selected = standaloneClamp(list.index or 1, 1, math.max(1, count))
+  local scroll = standaloneClamp(list.scroll or 0, 0,
+    math.max(0, count - visible))
+  if selected <= scroll then scroll = selected - 1 end
+  if selected > scroll + visible then scroll = selected - visible end
+
+  G.push("all")
+  G.origin()
+  G.setColor(0, 0, 0, 1)
+  G.rectangle("fill", vx, vy, vw, vh)
+  G.setColor(1, 1, 1, 1)
+  G.rectangle("fill", px, py, panelW, panelH)
+
+  standaloneDrawText(titleFont, list.title or "ITEMS", px + pad,
+    py + titleGap, { 0, 0, 0, 1 })
+  G.setColor(0.72, 0.72, 0.72, 1)
+  G.rectangle("fill", px + pad, py + headerH,
+    math.max(1, panelW - pad * 2), 2)
+
+  local now = love.timer and love.timer.getTime and love.timer.getTime() or os.clock()
+  local rightGap = math.max(16, standalonePixel(bodySize * 0.65))
+  local leftX = standalonePixel(px + pad + bodySize * 0.9)
+  local listRight = standalonePixel(px + panelW - pad)
+  for slot = 1, visible do
+    local index = scroll + slot
+    local item = list.items[index]
+    if not item then break end
+    local rowY = py + headerH + (slot - 1) * rowH
+    local rowSelected = index == selected
+    if rowSelected then
+      G.setColor(0.93, 0.93, 0.93, 1)
+      G.rectangle("fill", standalonePixel(px + pad * 0.55), rowY + 4,
+        standalonePixel(panelW - pad * 1.1), rowH - 8)
+      G.setColor(0, 0, 0, 1)
+      G.rectangle("fill", standalonePixel(px + pad * 0.68),
+        standalonePixel(rowY + rowH * 0.5 - bodySize * 0.34),
+        standalonePixel(bodySize * 0.48), standalonePixel(bodySize * 0.68))
+    end
+
+    local right = tostring(item.right or "")
+    local rightW = math.floor(bodyFont:getWidth(right) + 0.5)
+    local available = math.max(1,
+      standalonePixel(listRight - rightW - rightGap - leftX))
+    local label = tostring(item.label or item.name or "ITEM")
+    local labelW = standalonePixel(bodyFont:getWidth(label))
+    local textY = math.floor(rowY + (rowH - bodyFont:getHeight()) * 0.5 + 0.5)
+    local textColor = { 0, 0, 0, 1 }
+    if labelW <= available or not rowSelected then
+      G.setScissor(leftX, rowY, available, rowH)
+      standaloneDrawText(bodyFont, label, leftX, textY, textColor)
+      G.setScissor()
+    else
+      local speed = math.max(24, bodySize * 0.75)
+      local prefix = item.prefix
+      local move = item.move
+      if prefix and move then
+        local prefixW = standalonePixel(bodyFont:getWidth(prefix))
+        local moveArea = math.max(1, available - prefixW)
+        G.setScissor(leftX, rowY, available, rowH)
+        standaloneDrawText(bodyFont, prefix, leftX, textY, textColor)
+        G.setScissor(leftX + prefixW, rowY, moveArea, rowH)
+        standaloneDrawText(bodyFont, move,
+          leftX + prefixW + standaloneTickerOffset(now, labelW - available, speed),
+          textY, textColor)
+        G.setScissor()
+      else
+        G.setScissor(leftX, rowY, available, rowH)
+        standaloneDrawText(bodyFont, label,
+          leftX + standaloneTickerOffset(now, labelW - available, speed),
+          textY, textColor)
+        G.setScissor()
+      end
+    end
+    if right ~= "" then
+      standaloneDrawText(bodyFont, right, listRight - rightW, textY, textColor)
+    end
+  end
+
+  G.setColor(0.72, 0.72, 0.72, 1)
+  G.rectangle("fill", px + pad, py + panelH - footerH,
+    math.max(1, panelW - pad * 2), 2)
+  local footer = list.footer
+  if not footer or footer == "" then
+    footer = list.__usefulBagKind == "pc"
+      and "A use    B back"
+      or "LEFT/RIGHT pocket    A use    B back"
+  end
+  footer = standaloneFooterText(footer)
+  standaloneDrawText(footerFont,
+    footer, px + pad,
+    py + panelH - footerH + math.floor(pad * 0.25),
+    { 0.25, 0.25, 0.25, 1 })
+  local money = ("¥%d"):format(math.max(0, math.floor(tonumber(
+    game.save and game.save.money or 0) or 0)))
+  local moneyW = math.floor(footerFont:getWidth(money) + 0.5)
+  standaloneDrawText(footerFont, money, px + panelW - pad - moneyW,
+    py + panelH - footerH + math.floor(pad * 0.25),
+    { 0.25, 0.25, 0.25, 1 })
+  G.pop()
+end
+
+local function installStandalonePresentation(mod, session)
+  mod.hooks:wrap("screen.render_visible", function(next, visible, state)
+    local oneArgument = state == nil and type(visible) == "table"
+    if oneArgument then state, visible = visible, true end
+    local game = session.game or (state and state.game)
+    if session.active and state == session.active and game and game.stack
+        and game.stack:top() == state then
+      return false
+    end
+    if oneArgument then return next(state) end
+    return next(visible, state)
+  end, 100)
+
+  mod.hooks:wrap("render.compose", function(next, renderer, ctx)
+    local handled = next(renderer, ctx)
+    local game = session.game
+    if handled ~= true and session.active and game and game.stack
+        and game.stack:top() == session.active and ctx and ctx.uiCanvas
+        and love and love.graphics then
+      love.graphics.push("all")
+      love.graphics.setCanvas(ctx.uiCanvas)
+      love.graphics.clear(0, 0, 0, 0)
+      love.graphics.pop()
+    end
+    return handled
+  end, 100)
+
+  mod.hooks:wrap("render.hud", function(next, game, viewport)
+    session.game = game
+    next(game, viewport)
+    if session.active and game and game.stack and game.stack:top() == session.active
+        and love and love.graphics then
+      standaloneDrawBag(game, viewport, session.active)
+    end
+  end, 100)
+
+  mod.events:on("screen.popped", function(ev)
+    if ev and ev.state == session.active then
+      local game = session.game
+      local top = game and game.stack and game.stack:top()
+      if top and top.__usefulBagKind then
+        session.active = top
+        session.game = top.game or game
+      else
+        session.active = nil
+        session.game = nil
+      end
+      session.wantSort = false
+      session.sortOpen = false
+    end
+  end)
+
+  mod.events:on("screen.pushed", function(ev)
+    local state = ev and ev.state
+    if state and state.__usefulBagKind then
+      session.active = state
+      session.game = state.game or session.game
+    end
+  end)
+end
+
 -- ------------------------------------------------ entry chunk
 
 return function(mod)
@@ -636,6 +931,7 @@ return function(mod)
 
   -- one bag at a time; the game.ready Input wraps write TAB/R3 here
   local session = { active = nil, wantSort = false, sortOpen = false }
+  installStandalonePresentation(mod, session)
 
   -- A registered BagMenu wins over the builtin require fallback, so the
   -- start menu and the in-battle bag both get the pocketed list.  The
@@ -660,7 +956,9 @@ return function(mod)
     Input.keypressed = function(self, key)
       -- TAB is bound to SELECT; while the bag is open it means "sort"
       -- instead, and the press is swallowed so it cannot also swap
-      if key == "tab" and session.active and not session.sortOpen then
+      if key == "tab" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
         session.wantSort = true
         return
       end
@@ -669,7 +967,9 @@ return function(mod)
 
     local vanillaPad = Input.gamepadpressed
     Input.gamepadpressed = function(self, joystick, button)
-      if button == "rightstick" and session.active and not session.sortOpen then
+      if button == "rightstick" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
         session.wantSort = true
         return
       end
@@ -684,7 +984,9 @@ return function(mod)
       local vanillaNew = ListMenu.new
       ListMenu.new = function(game, title, items, opts)
         local list = vanillaNew(game, title, items, opts)
-        if PC_LISTS[list.title] then decoratePcList(list, game) end
+        if PC_LISTS[list.title] then
+          decoratePcList(list, game, session)
+        end
         return list
       end
     end
@@ -705,5 +1007,11 @@ return function(mod)
     tickerOffset = tickerOffset,
     labelForItem = labelForItem,
     tickerFor = tickerFor,
+    integerScale = standaloneScale,
+    fontScale = standaloneTextScale,
+    fontSize = standaloneFontSize,
+    titleSize = standaloneTitleSize,
+    footerText = standaloneFooterText,
+    headerHeight = standaloneHeaderHeight,
   }
 end

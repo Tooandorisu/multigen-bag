@@ -32,6 +32,11 @@ T.neq(ex, nil, "exports reachable")
 local Runtime = require("src.mods.Runtime")
 T.eq(#(run.mod.manifest.optional_dependencies or {}), 0,
   "the mod has no UI companion dependency")
+T.check(run.loader.optionSchemas.useful_bag
+    and run.loader.optionSchemas.useful_bag[1].key == "fullscreen_menu",
+  "the fullscreen menu toggle is exposed as a mod option")
+T.eq(run.loader.optionSchemas.useful_bag[1].default, true,
+  "the fullscreen presenter remains the default")
 T.check(Runtime.wantsHook("screen.render_visible"),
   "standalone presenter hides the native bag draw")
 T.check(Runtime.wantsHook("render.compose"),
@@ -45,7 +50,22 @@ T.eq(ex.integerScale(2048, 1536), 3, "3x viewport uses 3x integer scaling")
 T.eq(ex.fontScale(320, 240), 1, "tiny viewport keeps a fitting font scale")
 T.eq(ex.fontScale(640, 480), 2, "small window gets readable 2x text")
 T.eq(ex.fontScale(800, 600), 2, "window-sized viewport keeps readable 2x text")
+T.eq(ex.fontScale(360, 800), 2,
+  "portrait phone width rounds up to the next readable text scale")
+T.eq(ex.fontScale(320, 800), 1,
+  "very narrow portrait viewport keeps the minimum text scale")
+T.eq(ex.fontScale(1080, 2400), 4,
+  "tall high-resolution portrait viewport uses the 4x text ceiling")
 T.eq(ex.fontScale(2048, 1536), 3, "large viewport caps at 3x text")
+T.eq(ex.textScaleForRows(3, 220, false, function(scale)
+  return 20 * scale, 15 * scale, 15 * scale
+end), 1,
+"fullscreen type scale drops before fewer than four readable rows remain")
+local fourRows = ex.compactRowLayout(95)
+T.eq(fourRows.visible, 4,
+  "compact list reserves exactly four visible item slots")
+T.eq(fourRows.rowHeight, 23,
+  "compact list distributes its body height across the four slots")
 T.eq(ex.fontSize(16), 15, "Plain Pixel snaps a small font to its design em")
 T.eq(ex.fontSize(48), 45, "Plain Pixel snaps a scaled font to its design em")
 T.eq(ex.headerHeight(120, 24), 138,
@@ -423,6 +443,12 @@ T.eq(withdrawTm.items[1].label, "FIX TM01 FIX CUT",
 T.eq(ex.footerText("COIN CASE was\nstored via PC."),
   "COIN CASE was stored via PC.",
   "PC feedback is flattened into one fullscreen footer line")
+T.eq(ex.itemIndicator({ index = 1, items = { "A", "B", "C" } }), "1 / 3",
+  "footer indicator shows the selected item and list size")
+T.eq(ex.itemIndicator({ index = 99, items = { "A", "B", "C" } }), "3 / 3",
+  "footer indicator clamps a stale selection to the list")
+T.eq(ex.itemIndicator({ index = 1, items = {} }), "0 / 0",
+  "footer indicator handles an empty list")
 stubTm.stack = stack
 stack:push(withdrawTm)
 T.eq(Runtime.call("screen.render_visible", function() return true end,

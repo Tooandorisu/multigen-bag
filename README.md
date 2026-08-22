@@ -37,6 +37,10 @@ LEFT/RIGHT.
   of bleeding over the count.
 - **Cursor wrap.** The bag cursor wraps at the first/last item: Up on the
   first goes to the last and vice versa.
+- **Presentation toggle.** `FULLSCREEN BAG MENUS` is on by default in the mod
+  options. Turn it off for a smaller native-resolution pop-out that keeps the
+  same Useful Bag panel, selection, divider, ticker, footer, and money design;
+  pocket behavior, storage ordering, and SELECT-swap remain unchanged.
 
 ## How it works
 
@@ -59,3 +63,5 @@ python3 tools/modkit.py pack mods/useful_bag
 - Per-slot stack cap of 99 is untouched.
 - Legacy Gen 1 save imports read at most 20 bag items; the new cap applies
   to fresh native saves.
+- Useful Bag includes its own fullscreen presenter and does not require a
+  companion UI mod.

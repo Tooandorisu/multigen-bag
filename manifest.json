@@ -1,7 +1,7 @@
 {
   "id": "useful_bag",
   "name": "Useful Bag",
-  "version": "2.4.7",
+  "version": "2.5.11",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -14,6 +14,6 @@
   "dependencies": [],
   "optional_dependencies": [],
   "conflicts": [],
-  "description": "999-capacity bag auto-sorted into six pockets (Items, Medicine, Pok\u00e9 Balls, TMs / HMs, Battle Items, Key Items) cycled with Left/Right, plus TAB / R3 (right stick) to sort by name or count.",
+  "description": "999-capacity bag auto-sorted into six pockets (Items, Medicine, Pok\u00e9 Balls, TMs / HMs, Battle Items, Key Items) cycled with Left/Right, plus TAB / R3 (right stick) to sort by name or count. Fullscreen bag and PC menus can be switched back to the base-game pop-out style in mod options.",
   "github": "ShaneMcGovernIE/useful-bag"
 }

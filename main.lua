@@ -647,6 +647,7 @@ local STANDALONE_BASE_HEIGHT = 480
 local STANDALONE_TEXT_BASE_WIDTH = 320
 local STANDALONE_TEXT_BASE_HEIGHT = 240
 local STANDALONE_TEXT_MAX_SCALE = 3
+local STANDALONE_PORTRAIT_TEXT_MAX_SCALE = 4
 
 local function standaloneScale(width, height)
   return math.max(1, math.floor(math.min(
@@ -654,9 +655,22 @@ local function standaloneScale(width, height)
 end
 
 local function standaloneTextScale(width, height)
-  return math.max(1, math.min(STANDALONE_TEXT_MAX_SCALE, math.floor(math.min(
-    width / STANDALONE_TEXT_BASE_WIDTH,
-    height / STANDALONE_TEXT_BASE_HEIGHT))))
+  -- Desktop and landscape layouts still use the fitting scale so text never
+  -- grows beyond the available short axis.  Portrait layouts have a tall
+  -- reading surface and a narrow width; flooring the height-limited ratio
+  -- leaves phone-sized viewports at 1x even when their rows are visibly tiny.
+  -- Use the width-derived integer step there, rounding up so a viewport just
+  -- wider than the 320px text reference gets the next readable grid size.
+  local raw
+  if height > width then
+    raw = math.ceil(width / STANDALONE_TEXT_BASE_WIDTH)
+    return math.max(1, math.min(STANDALONE_PORTRAIT_TEXT_MAX_SCALE, raw))
+  else
+    raw = math.floor(math.min(
+      width / STANDALONE_TEXT_BASE_WIDTH,
+      height / STANDALONE_TEXT_BASE_HEIGHT))
+  end
+  return math.max(1, math.min(STANDALONE_TEXT_MAX_SCALE, raw))
 end
 
 local function standaloneClamp(value, lo, hi)
@@ -721,6 +735,10 @@ local function standaloneTickerOffset(time, overflow, speed)
   return -overflow + math.floor((position - hold) * speed + 0.5)
 end
 
+local function standaloneFullscreenEnabled(mod)
+  return mod.options:get("fullscreen_menu") ~= false
+end
+
 local function standaloneViewport(viewport)
   if viewport and viewport.safe then
     local safe = viewport.safe
@@ -739,27 +757,147 @@ local function standaloneDrawText(font, text, x, y, color)
   love.graphics.print(tostring(text or ""), x, y)
 end
 
-local function standaloneDrawBag(game, viewport, list)
+local function standaloneSetScissor(transform, x, y, width, height)
+  if transform then
+    love.graphics.setScissor(
+      standalonePixel(transform.x + x * transform.sx),
+      standalonePixel(transform.y + y * transform.sy),
+      math.max(1, standalonePixel(width * transform.sx)),
+      math.max(1, standalonePixel(height * transform.sy)))
+  else
+    love.graphics.setScissor(x, y, width, height)
+  end
+end
+
+local function standaloneFitFooter(font, text, maxWidth)
+  if font:getWidth(text) <= maxWidth then return text end
+  local suffix = ".."
+  for length = #text - 1, 1, -1 do
+    local candidate = text:sub(1, length) .. suffix
+    if font:getWidth(candidate) <= maxWidth then return candidate end
+  end
+  return ""
+end
+
+local function standaloneItemIndicator(list)
+  local items = list.items or {}
+  local count = #items
+  if count == 0 then return "0 / 0" end
+  local current = math.floor(tonumber(list.index) or 1)
+  current = standaloneClamp(current, 1, count)
+  return ("%d / %d"):format(current, count)
+end
+
+local function standaloneListLayout(panelH, textScale, titleHeight, bodyHeight,
+  footerHeight, compact)
+  local pad = compact and 6 or 12 * textScale
+  local titleGap = standaloneHeaderGap(pad)
+  local headerH = standaloneHeaderHeight(titleHeight, pad)
+  local footerH = standalonePixel(footerHeight) + pad
+  local dividerSpan = math.max(1, panelH - headerH - footerH)
+  local baseGap = compact and 2 or math.max(4, standalonePixel(pad * 0.35))
+  local listHeight = math.max(1, dividerSpan - baseGap * 2)
+  local minRowH = math.max(1, standalonePixel(bodyHeight + 2))
+  return {
+    pad = pad,
+    titleGap = titleGap,
+    headerH = headerH,
+    footerH = footerH,
+    dividerSpan = dividerSpan,
+    baseGap = baseGap,
+    listHeight = listHeight,
+    minRowH = minRowH,
+    fitsFour = listHeight >= minRowH * 4,
+  }
+end
+
+local function standaloneTextScaleForRows(maxScale, panelH, compact, measure)
+  for textScale = math.max(1, math.floor(maxScale or 1)), 1, -1 do
+    local titleHeight, bodyHeight, footerHeight = measure(textScale)
+    local layout = standaloneListLayout(panelH, textScale,
+      titleHeight, bodyHeight, footerHeight, compact)
+    if layout.fitsFour then return textScale end
+  end
+  return 1
+end
+
+-- The compact presenter is a 160x144 popup, so reserve four slots in its
+-- native list area. Fullscreen keeps its own established responsive rhythm.
+local function standaloneCompactRowLayout(listHeight)
+  local visible = 4
+  return {
+    visible = visible,
+    rowHeight = math.max(1, math.floor(listHeight / visible)),
+  }
+end
+
+local function standaloneDrawBag(game, viewport, list, transform)
   local G = love.graphics
+  local compact = transform and transform.compact or false
   local vx, vy, vw, vh = standaloneViewport(viewport)
   local scale = standaloneScale(vw, vh)
-  local textScale = standaloneTextScale(vw, vh)
-  local margin = 8 * scale
+  local maxTextScale = standaloneTextScale(vw, vh)
+  local margin = compact and 2 or 8 * scale
   local px, py = vx + margin, vy + margin
   local panelW, panelH = vw - margin * 2, vh - margin * 2
-  local pad = 12 * textScale
+  local textScale = standaloneTextScaleForRows(maxTextScale, panelH, compact,
+    function(candidate)
+      local titleFont = standaloneFont(standaloneTitleSize(candidate))
+      local bodyFont = standaloneFont(15 * candidate)
+      local footerScale = math.max(1,
+        math.floor(candidate * 2 / 3 + 0.5))
+      local footerFont = standaloneFont(15 * footerScale)
+      return titleFont:getHeight(), bodyFont:getHeight(), footerFont:getHeight()
+    end)
+  local pad = compact and 6 or 12 * textScale
   local titleSize = standaloneTitleSize(textScale)
   local bodySize = 15 * textScale
   local footerScale = math.max(1, math.floor(textScale * 2 / 3 + 0.5))
   local footerSize = 15 * footerScale
   local titleFont, bodyFont, footerFont = standaloneFont(titleSize),
     standaloneFont(bodySize), standaloneFont(footerSize)
-  local titleGap = standaloneHeaderGap(pad)
-  local headerH = standaloneHeaderHeight(titleFont:getHeight(), pad)
-  local footerH = standalonePixel(footerFont:getHeight()) + pad
-  local rowH = 24 * textScale
-  local availableH = math.max(rowH, panelH - headerH - footerH - pad)
-  local visible = math.max(1, math.floor(availableH / rowH))
+  local layout = standaloneListLayout(panelH, textScale, titleFont:getHeight(),
+    bodyFont:getHeight(), footerFont:getHeight(), compact)
+  local titleGap = layout.titleGap
+  local headerH = layout.headerH
+  local money = ("¥%d"):format(math.max(0, math.floor(tonumber(
+    game.save and game.save.money or 0) or 0)))
+  local moneyW = math.floor(footerFont:getWidth(money) + 0.5)
+  local footer = list.footer and standaloneFooterText(list.footer) or ""
+  if type(footer) ~= "string" then footer = "" end
+  -- BagMenu supplies the money as its native footer; money is rendered in the
+  -- stable right column here, so use the selected-item indicator on the left.
+  local controlFooter = footer == "" or footer == money
+  if footer == money then footer = "" end
+  local footerGap = compact and 4 or math.max(16, standalonePixel(pad * 0.75))
+  if controlFooter then footer = standaloneItemIndicator(list) end
+  local footerH = layout.footerH
+  local dividerSpan = layout.dividerSpan
+  local baseGap = layout.baseGap
+  local minRowH = layout.minRowH
+  local footerWidth = math.max(1,
+    panelW - pad * 2 - moneyW - footerGap)
+
+  -- The compact presenter is still drawn from the native 160x144 menu grid.
+  -- A 20px row keeps the native footer and header zones intact.  On a small
+  -- fullscreen viewport, text scale is lowered first so four readable rows
+  -- fit without making the pixel font overlap itself.
+  local listHeight = layout.listHeight
+  local rowH, visible
+  if compact then
+    local rows = standaloneCompactRowLayout(listHeight)
+    rowH, visible = rows.rowHeight, rows.visible
+  else
+    rowH = 24 * textScale
+    if listHeight < rowH * 4 then
+      rowH = math.max(minRowH, math.floor(listHeight / 4))
+    end
+    visible = math.max(1, math.floor(listHeight / rowH))
+  end
+  -- Use the same integer gap above the first row and below the last visible
+  -- row.  Any odd leftover pixel is kept on the lower side of the list.
+  local listGap = math.max(baseGap,
+    math.floor((dividerSpan - visible * rowH) / 2))
   local count = #list.items
   local selected = standaloneClamp(list.index or 1, 1, math.max(1, count))
   local scroll = standaloneClamp(list.scroll or 0, 0,
@@ -769,6 +907,10 @@ local function standaloneDrawBag(game, viewport, list)
 
   G.push("all")
   G.origin()
+  if transform then
+    G.translate(transform.x, transform.y)
+    G.scale(transform.sx, transform.sy)
+  end
   G.setColor(0, 0, 0, 1)
   G.rectangle("fill", vx, vy, vw, vh)
   G.setColor(1, 1, 1, 1)
@@ -788,16 +930,31 @@ local function standaloneDrawBag(game, viewport, list)
     local index = scroll + slot
     local item = list.items[index]
     if not item then break end
-    local rowY = py + headerH + (slot - 1) * rowH
+    local rowY = py + headerH + listGap + (slot - 1) * rowH
     local rowSelected = index == selected
     if rowSelected then
       G.setColor(0.93, 0.93, 0.93, 1)
       G.rectangle("fill", standalonePixel(px + pad * 0.55), rowY + 4,
         standalonePixel(panelW - pad * 1.1), rowH - 8)
       G.setColor(0, 0, 0, 1)
-      G.rectangle("fill", standalonePixel(px + pad * 0.68),
-        standalonePixel(rowY + rowH * 0.5 - bodySize * 0.34),
-        standalonePixel(bodySize * 0.48), standalonePixel(bodySize * 0.68))
+      local cursorX = standalonePixel(px + pad * 0.68)
+      local cursorY = standalonePixel(rowY + rowH * 0.5)
+      local arrowW = math.max(8, standalonePixel(bodySize * 0.65))
+      local arrowH = math.max(6, standalonePixel(bodySize * 0.5))
+      local stemH = math.max(3, standalonePixel(bodySize * 0.2))
+      local headW = math.max(4, arrowW - math.floor(stemH / 2))
+      local headX = cursorX + arrowW - headW
+      G.rectangle("fill", cursorX, cursorY - math.floor(stemH / 2),
+        math.max(1, headX - cursorX), stemH)
+      -- Build the head from one-pixel horizontal steps so it stays crisp on
+      -- the native grid and works with the engine's minimal graphics stub.
+      local halfH = math.max(1, math.floor((arrowH + 1) / 2))
+      for arrowRow = 0, arrowH - 1 do
+        local distance = math.min(arrowRow + 1, arrowH - arrowRow)
+        local width = math.max(1, standalonePixel(headW * distance / halfH))
+        G.rectangle("fill", headX,
+          cursorY - math.floor(arrowH / 2) + arrowRow, width, 1)
+      end
     end
 
     local right = tostring(item.right or "")
@@ -809,7 +966,7 @@ local function standaloneDrawBag(game, viewport, list)
     local textY = math.floor(rowY + (rowH - bodyFont:getHeight()) * 0.5 + 0.5)
     local textColor = { 0, 0, 0, 1 }
     if labelW <= available or not rowSelected then
-      G.setScissor(leftX, rowY, available, rowH)
+      standaloneSetScissor(transform, leftX, rowY, available, rowH)
       standaloneDrawText(bodyFont, label, leftX, textY, textColor)
       G.setScissor()
     else
@@ -819,15 +976,15 @@ local function standaloneDrawBag(game, viewport, list)
       if prefix and move then
         local prefixW = standalonePixel(bodyFont:getWidth(prefix))
         local moveArea = math.max(1, available - prefixW)
-        G.setScissor(leftX, rowY, available, rowH)
+        standaloneSetScissor(transform, leftX, rowY, available, rowH)
         standaloneDrawText(bodyFont, prefix, leftX, textY, textColor)
-        G.setScissor(leftX + prefixW, rowY, moveArea, rowH)
+        standaloneSetScissor(transform, leftX + prefixW, rowY, moveArea, rowH)
         standaloneDrawText(bodyFont, move,
           leftX + prefixW + standaloneTickerOffset(now, labelW - available, speed),
           textY, textColor)
         G.setScissor()
       else
-        G.setScissor(leftX, rowY, available, rowH)
+        standaloneSetScissor(transform, leftX, rowY, available, rowH)
         standaloneDrawText(bodyFont, label,
           leftX + standaloneTickerOffset(now, labelW - available, speed),
           textY, textColor)
@@ -842,22 +999,12 @@ local function standaloneDrawBag(game, viewport, list)
   G.setColor(0.72, 0.72, 0.72, 1)
   G.rectangle("fill", px + pad, py + panelH - footerH,
     math.max(1, panelW - pad * 2), 2)
-  local footer = list.footer
-  if not footer or footer == "" then
-    footer = list.__usefulBagKind == "pc"
-      and "A use    B back"
-      or "LEFT/RIGHT pocket    A use    B back"
-  end
-  footer = standaloneFooterText(footer)
-  standaloneDrawText(footerFont,
-    footer, px + pad,
-    py + panelH - footerH + math.floor(pad * 0.25),
+  local footerY = py + panelH - footerH + math.floor(pad * 0.25)
+  footer = standaloneFitFooter(footerFont, footer, footerWidth)
+  standaloneDrawText(footerFont, footer, px + pad, footerY,
     { 0.25, 0.25, 0.25, 1 })
-  local money = ("¥%d"):format(math.max(0, math.floor(tonumber(
-    game.save and game.save.money or 0) or 0)))
-  local moneyW = math.floor(footerFont:getWidth(money) + 0.5)
   standaloneDrawText(footerFont, money, px + panelW - pad - moneyW,
-    py + panelH - footerH + math.floor(pad * 0.25),
+    footerY,
     { 0.25, 0.25, 0.25, 1 })
   G.pop()
 end
@@ -881,10 +1028,12 @@ local function installStandalonePresentation(mod, session)
     if handled ~= true and session.active and game and game.stack
         and game.stack:top() == session.active and ctx and ctx.uiCanvas
         and love and love.graphics then
-      love.graphics.push("all")
-      love.graphics.setCanvas(ctx.uiCanvas)
-      love.graphics.clear(0, 0, 0, 0)
-      love.graphics.pop()
+      if standaloneFullscreenEnabled(mod) then
+        love.graphics.push("all")
+        love.graphics.setCanvas(ctx.uiCanvas)
+        love.graphics.clear(0, 0, 0, 0)
+        love.graphics.pop()
+      end
     end
     return handled
   end, 100)
@@ -892,9 +1041,26 @@ local function installStandalonePresentation(mod, session)
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     session.game = game
     next(game, viewport)
-    if session.active and game and game.stack and game.stack:top() == session.active
+    if standaloneFullscreenEnabled(mod)
+        and session.active and game and game.stack and game.stack:top() == session.active
         and love and love.graphics then
       standaloneDrawBag(game, viewport, session.active)
+    elseif session.active and game and game.stack and game.stack:top() == session.active
+        and love and love.graphics then
+      local renderer = game.renderer
+      local uiw, uih = 160, 144
+      if renderer and renderer.uiSize then uiw, uih = renderer:uiSize() end
+      local gameX = viewport and viewport.gameX or 0
+      local gameY = viewport and viewport.gameY or 0
+      local gameW = viewport and viewport.gameWidth or uiw
+      local gameH = viewport and viewport.gameHeight or uih
+      standaloneDrawBag(game, { width = uiw, height = uih }, session.active, {
+        compact = true,
+        x = gameX,
+        y = gameY,
+        sx = gameW / uiw,
+        sy = gameH / uih,
+      })
     end
   end, 100)
 
@@ -926,6 +1092,11 @@ end
 -- ------------------------------------------------ entry chunk
 
 return function(mod)
+  mod.options:define({
+    { key = "fullscreen_menu", label = "FULLSCREEN BAG MENUS",
+      type = "toggle", default = true },
+  })
+
   mod.content.constants:patch("bagSize", 999)
   mod.content.field:patch("pcItemCap", 999)
 
@@ -1012,6 +1183,9 @@ return function(mod)
     fontSize = standaloneFontSize,
     titleSize = standaloneTitleSize,
     footerText = standaloneFooterText,
+    itemIndicator = standaloneItemIndicator,
+    textScaleForRows = standaloneTextScaleForRows,
+    compactRowLayout = standaloneCompactRowLayout,
     headerHeight = standaloneHeaderHeight,
   }
 end

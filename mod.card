@@ -5,17 +5,22 @@ return {
   contact = "https://github.com/bryanthaboi/gen1recomp",
   tags = { "inventory", "bag", "quality-of-life" },
   differences = {
-    changed = { "bag capacity 20 -> 999 distinct item slots" },
+    changed = {
+      "bag capacity 20 -> 999 distinct item slots",
+      "bag and PC item stacks 99 -> 999",
+    },
     added = {
       "six auto-sorted pockets (ITEMS, MEDICINE, POKé BALLS, TMs / HMs, BATTLE ITEMS, KEY ITEMS) cycled with LEFT/RIGHT, wrapping at both ends",
       "a hidden bag (the flat inventory) underneath the pockets so key items keep working no matter which pocket the bag was closed on",
       "battle-aware pockets: the in-battle bag opens on BATTLE ITEMS and skips TMs / HMs and KEY ITEMS when cycling",
+      "the POKé FLUTE is in BATTLE ITEMS in battle and KEY ITEMS in the overworld",
+      "the last battle pocket is remembered for the current runtime session",
       "TAB / R3 while the bag is open sorts it by name or by count",
+      "touchscreen SELECT while the bag is open opens the sort prompt",
       "the bag cursor wraps around at the first/last item",
     },
     known = {
-      "the per-slot quantity cap of 99 is unchanged",
-      "legacy Gen 1 save imports still read at most 20 bag items; the cap applies to fresh native saves",
+      "legacy Gen 1 raw save imports/exports still read at most 20 bag items and cap quantities at 99",
     },
   },
   credits = {},

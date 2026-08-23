@@ -2,9 +2,10 @@
 --
 -- The bag is split into six pockets -- ITEMS, MEDICINE, POKé BALLS,
 -- TMs / HMs, BATTLE ITEMS and KEY ITEMS -- that the player cycles with
--- LEFT / RIGHT (wrapping at the ends).  TAB (keyboard) or R3 / right stick
--- click (controller) still opens the SORT BY NAME / SORT BY COUNT prompt,
--- and Up on the first item / Down on the last item wraps around.
+-- LEFT / RIGHT (wrapping at the ends).  TAB (keyboard), R3 / right stick
+-- click (controller), or the touchscreen SELECT overlay opens the SORT BY
+-- NAME / SORT BY COUNT prompt, and Up on the first item / Down on the last
+-- item wraps around.
 --
 -- The in-battle bag is battle-aware: it opens on the BATTLE ITEMS pocket
 -- (or the first non-empty usable pocket) and its L/R cycling skips TMs /
@@ -21,9 +22,10 @@
 -- Bag.remove wrote the real inventory; use a potion and the hidden count
 -- matches the MEDICINE pocket because both read the same save.inventory.
 --
--- The capacity half is two one-line registry patches: the bag limit
--- (Data.constants.bagSize; Bag.capacity consults it) and the PC storage
--- cap (Data.field.pcItemCap; PlayerPC.pcFull consults it).
+-- The capacity half is three registry patches: the bag limit
+-- (Data.constants.bagSize; Bag.capacity consults it), the per-stack limit
+-- (Data.constants.itemStackCap; Bag.add and PlayerPC consult it), and the PC
+-- storage cap (Data.field.pcItemCap; PlayerPC.pcFull consults it).
 --
 -- The pocket half rides the ui.screens registry: a registered "BagMenu"
 -- wins over the builtin require fallback (src/ui/Screens.lua), so both
@@ -47,6 +49,54 @@
 -- other option-row mods use) when it is too wide for the row window.
 
 local Bag = require("src.inventory.Bag")
+local USEFUL_STACK_CAP = 999
+local nativeStackCapacity = Bag.stackCapacity
+
+-- Older Gen 1 payloads do not expose Bag.stackCapacity to mods even though
+-- the shared limit is still present in the merged constants table.  Keep the
+-- shop guard compatible with both engine shapes.
+local function stackCapacity(data)
+  local native = type(nativeStackCapacity) == "function"
+      and nativeStackCapacity(data) or nil
+  local configured = data and data.constants and data.constants.itemStackCap
+  if type(native) == "number" and native >= USEFUL_STACK_CAP then
+    return math.floor(native)
+  end
+  if type(configured) == "number" and configured >= USEFUL_STACK_CAP then
+    return math.floor(configured)
+  end
+  return USEFUL_STACK_CAP
+end
+
+-- Older Gen 1 payloads may still reject an existing stack at x99 inside
+-- Bag.add, even after the constants patch.  Preserve the engine's normal
+-- behavior first, then repair only that narrow existing-stack rejection.
+local function installStackCapacityCompatibility()
+  Bag.stackCapacity = stackCapacity
+  if Bag.__usefulBagStackCapacity then return end
+  Bag.__usefulBagStackCapacity = true
+
+  if type(Bag.add) ~= "function" then return end
+  local vanillaAdd = Bag.add
+  Bag.__usefulBagVanillaAdd = vanillaAdd
+  Bag.add = function(save, id, qty, data)
+    local inventory = save and save.inventory
+    local before = inventory and inventory[id]
+    local amount = tonumber(qty) or 1
+    if vanillaAdd(save, id, qty, data) then return true end
+
+    -- A new stack must continue to obey the engine's distinct-slot rules.
+    -- Only an unchanged, already-existing positive stack can use this
+    -- compatibility path.
+    if type(before) ~= "number" or before < 1 or amount < 1
+        or inventory[id] ~= before then
+      return false
+    end
+    if before + amount > stackCapacity(data) then return false end
+    inventory[id] = before + amount
+    return true
+  end
+end
 
 local SORT_MODE_LABELS = { "SORT BY NAME", "SORT BY COUNT" }
 
@@ -123,11 +173,14 @@ local function isMachine(id, def)
   return head == "TM" or head == "HM"
 end
 
--- Which pocket an item id lives in.  Key items win (a key item is never
--- also a TM or ball), then TMs/HMs, balls, medicine, battle items, and
--- everything else falls into the generic ITEMS pocket.
-local function classify(data, id)
+-- Which pocket an item id lives in.  The Poké Flute is the contextual
+-- exception: it is usable in battle, so it belongs with BATTLE ITEMS there,
+-- while it remains a KEY ITEM in the overworld.  All other key items win (a
+-- key item is never also a TM or ball), then TMs/HMs, balls, medicine, battle
+-- items, and everything else falls into the generic ITEMS pocket.
+local function classify(data, id, inBattle)
   local def = data.items and data.items[id]
+  if id == "POKE_FLUTE" and inBattle then return "battle" end
   if (def and def.keyItem) or KEY_ITEMS[id] then return "key" end
   if isMachine(id, def) then return "tms" end
   if (def and def.ball) or BALLS[id] then return "balls" end
@@ -139,10 +192,10 @@ end
 -- The ids in `order` (an array of item ids, e.g. Bag.order(save)) that
 -- belong to a pocket.  Keeps the incoming order, so pockets follow the
 -- bag's current sort (acquisition order, or the TAB/R3 name/count sort).
-local function pocketItems(order, data, pocketId)
+local function pocketItems(order, data, pocketId, inBattle)
   local out = {}
   for _, id in ipairs(order) do
-    if classify(data, id) == pocketId then table.insert(out, id) end
+    if classify(data, id, inBattle) == pocketId then table.insert(out, id) end
   end
   return out
 end
@@ -450,7 +503,7 @@ local function decorate(list, game, session, opts)
     local curId = list.items[list.index] and list.items[list.index].value
     local items, ids = {}, {}
     for _, id in ipairs(order) do
-      if classify(game.data, id) == pocket.id then
+      if classify(game.data, id, list.__battle and true or false) == pocket.id then
         table.insert(ids, id)
         local label, prefixW, prefix, move = labelForItem(game.data, id)
         table.insert(items, {
@@ -553,6 +606,9 @@ local function decorate(list, game, session, opts)
 
   local vanillaClose = list.close
   list.close = function(self, ...)
+    if self.__battle then
+      session.lastBattlePocket = POCKETS[self.__pocketIndex].id
+    end
     if session.active == self then
       session.active = nil
       session.game = nil
@@ -565,14 +621,23 @@ local function decorate(list, game, session, opts)
 
   session.active = list
   session.wantSort = false -- presses before the bag opened do not carry over
-  -- a battle bag opens on the BATTLE ITEMS pocket (falling back to the
-  -- first non-empty usable pocket), not the generic ITEMS; cycling skips
-  -- TMs / HMs and KEY ITEMS via switchPocket
+  -- A battle bag prefers the last runtime battle pocket when it still has
+  -- usable items, then falls back to the normal battle priority.  Cycling
+  -- skips TMs / HMs and KEY ITEMS via switchPocket.
   if list.__battle then
-    for _, pid in ipairs(BATTLE_START_PRIORITY) do
-      list.__pocketIndex = POCKET_INDEX[pid]
+    local preferred = session.lastBattlePocket
+    local restored = false
+    if preferred and not BATTLE_UNUSABLE[preferred] then
+      list.__pocketIndex = POCKET_INDEX[preferred]
       project()
-      if #list.items > 0 then break end
+      restored = #list.items > 0
+    end
+    if not restored then
+      for _, pid in ipairs(BATTLE_START_PRIORITY) do
+        list.__pocketIndex = POCKET_INDEX[pid]
+        project()
+        if #list.items > 0 then break end
+      end
     end
   else
     project()
@@ -1065,6 +1130,9 @@ local function installStandalonePresentation(mod, session)
   end, 100)
 
   mod.events:on("screen.popped", function(ev)
+    if ev and ev.state and ev.state == session.active and ev.state.__battle then
+      session.lastBattlePocket = POCKETS[ev.state.__pocketIndex].id
+    end
     if ev and ev.state == session.active then
       local game = session.game
       local top = game and game.stack and game.stack:top()
@@ -1098,10 +1166,13 @@ return function(mod)
   })
 
   mod.content.constants:patch("bagSize", 999)
+  mod.content.constants:patch("itemStackCap", 999)
   mod.content.field:patch("pcItemCap", 999)
+  installStackCapacityCompatibility()
 
-  -- one bag at a time; the game.ready Input wraps write TAB/R3 here
+  -- one bag at a time; the game.ready Input wraps write TAB/R3/touch SELECT here
   local session = { active = nil, wantSort = false, sortOpen = false }
+  local shopQuantityContext = nil
   installStandalonePresentation(mod, session)
 
   -- A registered BagMenu wins over the builtin require fallback, so the
@@ -1120,8 +1191,8 @@ return function(mod)
     local Input = require("src.core.Input")
 
     -- hot reload re-runs entry chunks: wrap each module once
-    if Input.__usefulBag then return end
-    Input.__usefulBag = true
+    if not Input.__usefulBag then
+      Input.__usefulBag = true
 
     local vanillaKey = Input.keypressed
     Input.keypressed = function(self, key)
@@ -1147,6 +1218,19 @@ return function(mod)
       return vanillaPad(self, joystick, button)
     end
 
+    local vanillaOverlayPressed = Input.overlayPressed
+    Input.overlayPressed = function(self, button)
+      if button == "select" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
+        session.wantSort = true
+        return
+      end
+      return vanillaOverlayPressed(self, button)
+    end
+
+    end
+
     -- the PC's three item lists never got the vanilla SELECT-swap; catch
     -- them where they are built (PlayerPC.lua) and decorate them
     local ListMenu = require("src.ui.ListMenu")
@@ -1161,10 +1245,73 @@ return function(mod)
         return list
       end
     end
+
+    -- Some Gen 1 shop payloads still give the BUY quantity picker the old
+    -- hard-coded 999 maximum.  Keep the shop UI aligned with the shared
+    -- Bag.add ceiling here, in the mod, so an installed Useful Bag protects
+    -- itself even when the launched engine payload is stale.
+    local function shopFullText(g)
+      local text = g and g.data and g.data.text
+      if type(text) == "table"
+          and type(text._PokemartItemBagFullText) == "string" then
+        return text._PokemartItemBagFullText
+      end
+      return "You can't carry\nany more items."
+    end
+
+    if not ListMenu.__usefulBagShopCapacity then
+      ListMenu.__usefulBagShopCapacity = true
+      local vanillaShopListNew = ListMenu.new
+      ListMenu.new = function(shopGame, title, items, opts)
+        local list = vanillaShopListNew(shopGame, title, items, opts)
+        if title ~= "BUY" or not list or not list.onChoose then
+          return list
+        end
+
+        local vanillaChoose = list.onChoose
+        list.onChoose = function(item, currentList)
+          local itemId = item and item.value
+          local inventory = shopGame.save and shopGame.save.inventory
+          local current = inventory and inventory[itemId] or 0
+          local capacity = stackCapacity(shopGame.data)
+          local remaining = math.max(0, capacity - current)
+          if remaining < 1 then
+            list.footer = shopFullText(shopGame)
+            return
+          end
+
+          local previous = shopQuantityContext
+          shopQuantityContext = {
+            game = shopGame,
+            itemId = itemId,
+            remaining = remaining,
+          }
+          local ok, result = pcall(vanillaChoose, item, currentList)
+          shopQuantityContext = previous
+          if not ok then error(result, 0) end
+          return result
+        end
+        return list
+      end
+    end
+
+    local QuantityBox = require("src.ui.QuantityBox")
+    if not QuantityBox.__usefulBagShopCapacity then
+      QuantityBox.__usefulBagShopCapacity = true
+      local vanillaQuantityNew = QuantityBox.new
+      QuantityBox.new = function(quantityGame, opts)
+        local context = shopQuantityContext
+        if context and context.game == quantityGame and opts then
+          opts.max = math.min(opts.max or context.remaining, context.remaining)
+        end
+        return vanillaQuantityNew(quantityGame, opts)
+      end
+    end
   end)
 
   mod.exports = {
     POCKETS = POCKETS,
+    stackCapacity = stackCapacity,
     classify = classify,
     pocketItems = pocketItems,
     hiddenOrder = hiddenOrder,

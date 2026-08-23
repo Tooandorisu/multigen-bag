@@ -1,5 +1,39 @@
 # Changelog
 
+## [2.6.3] - 2026-08-23
+### Fixed
+- Mart purchases and other existing-stack additions no longer fall back to
+  the Gen 1 engine's x99 rejection; the Useful Bag compatibility layer now
+  enforces x999 at the shared `Bag.add` boundary.
+
+## [2.6.2] - 2026-08-23
+### Fixed
+- Prevented a Mart crash on engine payloads that do not expose
+  `Bag.stackCapacity`; the mod now reads the merged stack-cap constant.
+- Existing-stack additions in older Gen 1 payloads now use the same x999
+  ceiling instead of falling back to the engine's x99 rejection.
+
+## [2.6.1] - 2026-08-23
+### Fixed
+- Shop purchase quantities now respect the remaining x999 stack capacity even
+  when the launched engine payload still supplies the old picker maximum.
+- The shop guard now falls back to the merged item-stack constant when an older
+  engine payload does not expose `Bag.stackCapacity`.
+
+## [2.6.0] - 2026-08-23
+### Added
+- Item stacks now support quantities through x999 in the bag and PC.
+- The Poké Flute appears in BATTLE ITEMS during battle and KEY ITEMS in the
+  overworld.
+- Battle bags remember their last usable pocket for the current runtime
+  session.
+- Touchscreen SELECT opens the bag sort prompt without changing PC SELECT-swap
+  behavior.
+
+### Known limitations
+- Legacy Gen 1 raw save imports/exports retain their 20-entry and x99 quantity
+  format limits; native runtime saves support x999 stacks.
+
 ## [2.5.11] - 2026-08-22
 ### Added
 - `FULLSCREEN BAG MENUS` can be disabled in mod options to use a smaller,

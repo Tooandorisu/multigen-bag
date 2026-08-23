@@ -1,7 +1,7 @@
 {
   "id": "useful_bag",
   "name": "Useful Bag",
-  "version": "2.5.11",
+  "version": "2.6.3",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",

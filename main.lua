@@ -2,9 +2,10 @@
 --
 -- The bag is split into six pockets -- ITEMS, MEDICINE, POKé BALLS,
 -- TMs / HMs, BATTLE ITEMS and KEY ITEMS -- that the player cycles with
--- LEFT / RIGHT (wrapping at the ends).  TAB (keyboard) or R3 / right stick
--- click (controller) still opens the SORT BY NAME / SORT BY COUNT prompt,
--- and Up on the first item / Down on the last item wraps around.
+-- LEFT / RIGHT (wrapping at the ends).  TAB (keyboard), R3 / right stick
+-- click (controller), or the touchscreen SELECT overlay opens the SORT BY
+-- NAME / SORT BY COUNT prompt, and Up on the first item / Down on the last
+-- item wraps around.
 --
 -- The in-battle bag is battle-aware: it opens on the BATTLE ITEMS pocket
 -- (or the first non-empty usable pocket) and its L/R cycling skips TMs /
@@ -21,9 +22,10 @@
 -- Bag.remove wrote the real inventory; use a potion and the hidden count
 -- matches the MEDICINE pocket because both read the same save.inventory.
 --
--- The capacity half is two one-line registry patches: the bag limit
--- (Data.constants.bagSize; Bag.capacity consults it) and the PC storage
--- cap (Data.field.pcItemCap; PlayerPC.pcFull consults it).
+-- The capacity half is three registry patches: the bag limit
+-- (Data.constants.bagSize; Bag.capacity consults it), the per-stack limit
+-- (Data.constants.itemStackCap; Bag.add and PlayerPC consult it), and the PC
+-- storage cap (Data.field.pcItemCap; PlayerPC.pcFull consults it).
 --
 -- The pocket half rides the ui.screens registry: a registered "BagMenu"
 -- wins over the builtin require fallback (src/ui/Screens.lua), so both
@@ -47,6 +49,54 @@
 -- other option-row mods use) when it is too wide for the row window.
 
 local Bag = require("src.inventory.Bag")
+local USEFUL_STACK_CAP = 999
+local nativeStackCapacity = Bag.stackCapacity
+
+-- Older Gen 1 payloads do not expose Bag.stackCapacity to mods even though
+-- the shared limit is still present in the merged constants table.  Keep the
+-- shop guard compatible with both engine shapes.
+local function stackCapacity(data)
+  local native = type(nativeStackCapacity) == "function"
+      and nativeStackCapacity(data) or nil
+  local configured = data and data.constants and data.constants.itemStackCap
+  if type(native) == "number" and native >= USEFUL_STACK_CAP then
+    return math.floor(native)
+  end
+  if type(configured) == "number" and configured >= USEFUL_STACK_CAP then
+    return math.floor(configured)
+  end
+  return USEFUL_STACK_CAP
+end
+
+-- Older Gen 1 payloads may still reject an existing stack at x99 inside
+-- Bag.add, even after the constants patch.  Preserve the engine's normal
+-- behavior first, then repair only that narrow existing-stack rejection.
+local function installStackCapacityCompatibility()
+  Bag.stackCapacity = stackCapacity
+  if Bag.__usefulBagStackCapacity then return end
+  Bag.__usefulBagStackCapacity = true
+
+  if type(Bag.add) ~= "function" then return end
+  local vanillaAdd = Bag.add
+  Bag.__usefulBagVanillaAdd = vanillaAdd
+  Bag.add = function(save, id, qty, data)
+    local inventory = save and save.inventory
+    local before = inventory and inventory[id]
+    local amount = tonumber(qty) or 1
+    if vanillaAdd(save, id, qty, data) then return true end
+
+    -- A new stack must continue to obey the engine's distinct-slot rules.
+    -- Only an unchanged, already-existing positive stack can use this
+    -- compatibility path.
+    if type(before) ~= "number" or before < 1 or amount < 1
+        or inventory[id] ~= before then
+      return false
+    end
+    if before + amount > stackCapacity(data) then return false end
+    inventory[id] = before + amount
+    return true
+  end
+end
 
 local SORT_MODE_LABELS = { "SORT BY NAME", "SORT BY COUNT" }
 
@@ -123,11 +173,14 @@ local function isMachine(id, def)
   return head == "TM" or head == "HM"
 end
 
--- Which pocket an item id lives in.  Key items win (a key item is never
--- also a TM or ball), then TMs/HMs, balls, medicine, battle items, and
--- everything else falls into the generic ITEMS pocket.
-local function classify(data, id)
+-- Which pocket an item id lives in.  The Poké Flute is the contextual
+-- exception: it is usable in battle, so it belongs with BATTLE ITEMS there,
+-- while it remains a KEY ITEM in the overworld.  All other key items win (a
+-- key item is never also a TM or ball), then TMs/HMs, balls, medicine, battle
+-- items, and everything else falls into the generic ITEMS pocket.
+local function classify(data, id, inBattle)
   local def = data.items and data.items[id]
+  if id == "POKE_FLUTE" and inBattle then return "battle" end
   if (def and def.keyItem) or KEY_ITEMS[id] then return "key" end
   if isMachine(id, def) then return "tms" end
   if (def and def.ball) or BALLS[id] then return "balls" end
@@ -139,10 +192,10 @@ end
 -- The ids in `order` (an array of item ids, e.g. Bag.order(save)) that
 -- belong to a pocket.  Keeps the incoming order, so pockets follow the
 -- bag's current sort (acquisition order, or the TAB/R3 name/count sort).
-local function pocketItems(order, data, pocketId)
+local function pocketItems(order, data, pocketId, inBattle)
   local out = {}
   for _, id in ipairs(order) do
-    if classify(data, id) == pocketId then table.insert(out, id) end
+    if classify(data, id, inBattle) == pocketId then table.insert(out, id) end
   end
   return out
 end
@@ -436,6 +489,8 @@ end
 -- opens on BATTLE ITEMS and skips the unusable pockets when cycling.
 local function decorate(list, game, session, opts)
   -- pocket view starts on ITEMS
+  session.game = game
+  list.__usefulBagKind = "bag"
   list.__pocketIndex = 1
   list.wrap = true -- Up on the first / Down on the last item wraps
   list.__battle = opts and opts.battle or nil -- battle bags cycle tighter
@@ -448,7 +503,7 @@ local function decorate(list, game, session, opts)
     local curId = list.items[list.index] and list.items[list.index].value
     local items, ids = {}, {}
     for _, id in ipairs(order) do
-      if classify(game.data, id) == pocket.id then
+      if classify(game.data, id, list.__battle and true or false) == pocket.id then
         table.insert(ids, id)
         local label, prefixW, prefix, move = labelForItem(game.data, id)
         table.insert(items, {
@@ -551,7 +606,13 @@ local function decorate(list, game, session, opts)
 
   local vanillaClose = list.close
   list.close = function(self, ...)
-    if session.active == self then session.active = nil end
+    if self.__battle then
+      session.lastBattlePocket = POCKETS[self.__pocketIndex].id
+    end
+    if session.active == self then
+      session.active = nil
+      session.game = nil
+    end
     return vanillaClose(self, ...)
   end
 
@@ -560,14 +621,23 @@ local function decorate(list, game, session, opts)
 
   session.active = list
   session.wantSort = false -- presses before the bag opened do not carry over
-  -- a battle bag opens on the BATTLE ITEMS pocket (falling back to the
-  -- first non-empty usable pocket), not the generic ITEMS; cycling skips
-  -- TMs / HMs and KEY ITEMS via switchPocket
+  -- A battle bag prefers the last runtime battle pocket when it still has
+  -- usable items, then falls back to the normal battle priority.  Cycling
+  -- skips TMs / HMs and KEY ITEMS via switchPocket.
   if list.__battle then
-    for _, pid in ipairs(BATTLE_START_PRIORITY) do
-      list.__pocketIndex = POCKET_INDEX[pid]
+    local preferred = session.lastBattlePocket
+    local restored = false
+    if preferred and not BATTLE_UNUSABLE[preferred] then
+      list.__pocketIndex = POCKET_INDEX[preferred]
       project()
-      if #list.items > 0 then break end
+      restored = #list.items > 0
+    end
+    if not restored then
+      for _, pid in ipairs(BATTLE_START_PRIORITY) do
+        list.__pocketIndex = POCKET_INDEX[pid]
+        project()
+        if #list.items > 0 then break end
+      end
     end
   else
     project()
@@ -586,7 +656,10 @@ end
 -- alphabetical sort) so a reorder persists visibly across reopening.
 local PC_LISTS = { ["WITHDRAW ITEM"] = true, ["DEPOSIT ITEM"] = true, ["TOSS ITEM"] = true }
 
-local function decoratePcList(list, game)
+local function decoratePcList(list, game, session)
+  session.game = game
+  session.active = list
+  list.__usefulBagKind = "pc"
   local order = list.title == "DEPOSIT ITEM"
     and Bag.order(game.save)   -- the deposit list shows the bag
     or pcOrder(game.save)      -- withdraw / toss show the PC storage
@@ -628,14 +701,479 @@ local function decoratePcList(list, game)
   end
 end
 
+-- ------------------------------------------------ standalone presentation
+
+-- Useful Bag owns its presentation so it does not need a companion UI mod.
+-- The engine keeps ListMenu as the input/state owner; these hooks only hide
+-- its 160x144 draw and paint the current bag state after the normal frame.
+local standaloneFonts = {}
+local STANDALONE_BASE_WIDTH = 640
+local STANDALONE_BASE_HEIGHT = 480
+local STANDALONE_TEXT_BASE_WIDTH = 320
+local STANDALONE_TEXT_BASE_HEIGHT = 240
+local STANDALONE_TEXT_MAX_SCALE = 3
+local STANDALONE_PORTRAIT_TEXT_MAX_SCALE = 4
+
+local function standaloneScale(width, height)
+  return math.max(1, math.floor(math.min(
+    width / STANDALONE_BASE_WIDTH, height / STANDALONE_BASE_HEIGHT)))
+end
+
+local function standaloneTextScale(width, height)
+  -- Desktop and landscape layouts still use the fitting scale so text never
+  -- grows beyond the available short axis.  Portrait layouts have a tall
+  -- reading surface and a narrow width; flooring the height-limited ratio
+  -- leaves phone-sized viewports at 1x even when their rows are visibly tiny.
+  -- Use the width-derived integer step there, rounding up so a viewport just
+  -- wider than the 320px text reference gets the next readable grid size.
+  local raw
+  if height > width then
+    raw = math.ceil(width / STANDALONE_TEXT_BASE_WIDTH)
+    return math.max(1, math.min(STANDALONE_PORTRAIT_TEXT_MAX_SCALE, raw))
+  else
+    raw = math.floor(math.min(
+      width / STANDALONE_TEXT_BASE_WIDTH,
+      height / STANDALONE_TEXT_BASE_HEIGHT))
+  end
+  return math.max(1, math.min(STANDALONE_TEXT_MAX_SCALE, raw))
+end
+
+local function standaloneClamp(value, lo, hi)
+  return math.max(lo, math.min(hi, value))
+end
+
+local function standalonePixel(value)
+  return math.floor(value + 0.5)
+end
+
+local function standaloneFontSize(size)
+  local Font = require("src.render.Font")
+  local em = Font.PLAINPIXEL_SIZE or 15
+  return math.max(em, math.floor(size / em + 0.5) * em)
+end
+
+local function standaloneFont(size)
+  size = standaloneFontSize(size)
+  if standaloneFonts[size] then return standaloneFonts[size] end
+  local Font = require("src.render.Font")
+  local ok, font = pcall(love.graphics.newFont, Font.PLAINPIXEL, size,
+    "mono", 1)
+  if not ok or not font then font = love.graphics.newFont(size) end
+  if font.setFilter then font:setFilter("nearest", "nearest") end
+  standaloneFonts[size] = font
+  return font
+end
+
+local function standaloneTitleSize(textScale)
+  return standaloneFontSize(20 * textScale)
+end
+
+local function standaloneFooterText(text)
+  if type(text) ~= "string" then return text end
+  return (text:gsub("[\r\n]+", " "))
+end
+
+local function standaloneHeaderGap(pad)
+  return math.max(2, standalonePixel(pad * 0.5))
+end
+
+local function standaloneDividerGap(pad)
+  return math.max(1, standalonePixel(pad * 0.25))
+end
+
+local function standaloneHeaderHeight(titleHeight, pad)
+  return standaloneHeaderGap(pad) + standalonePixel(titleHeight)
+    + standaloneDividerGap(pad)
+end
+
+local function standaloneTickerOffset(time, overflow, speed)
+  if overflow <= 0 then return 0 end
+  local hold = 1.25
+  local travel = overflow / speed
+  local cycle = hold * 2 + travel * 2
+  local position = time % cycle
+  if position < hold then return 0 end
+  position = position - hold
+  if position < travel then return -math.floor(position * speed + 0.5) end
+  position = position - travel
+  if position < hold then return -overflow end
+  return -overflow + math.floor((position - hold) * speed + 0.5)
+end
+
+local function standaloneFullscreenEnabled(mod)
+  return mod.options:get("fullscreen_menu") ~= false
+end
+
+local function standaloneViewport(viewport)
+  if viewport and viewport.safe then
+    local safe = viewport.safe
+    return safe.x or 0, safe.y or 0,
+      math.max(1, safe.width or viewport.width or 1),
+      math.max(1, safe.height or viewport.height or 1)
+  end
+  local width = viewport and viewport.width or love.graphics.getWidth()
+  local height = viewport and viewport.height or love.graphics.getHeight()
+  return 0, 0, math.max(1, width), math.max(1, height)
+end
+
+local function standaloneDrawText(font, text, x, y, color)
+  love.graphics.setFont(font)
+  love.graphics.setColor(color[1], color[2], color[3], color[4] or 1)
+  love.graphics.print(tostring(text or ""), x, y)
+end
+
+local function standaloneSetScissor(transform, x, y, width, height)
+  if transform then
+    love.graphics.setScissor(
+      standalonePixel(transform.x + x * transform.sx),
+      standalonePixel(transform.y + y * transform.sy),
+      math.max(1, standalonePixel(width * transform.sx)),
+      math.max(1, standalonePixel(height * transform.sy)))
+  else
+    love.graphics.setScissor(x, y, width, height)
+  end
+end
+
+local function standaloneFitFooter(font, text, maxWidth)
+  if font:getWidth(text) <= maxWidth then return text end
+  local suffix = ".."
+  for length = #text - 1, 1, -1 do
+    local candidate = text:sub(1, length) .. suffix
+    if font:getWidth(candidate) <= maxWidth then return candidate end
+  end
+  return ""
+end
+
+local function standaloneItemIndicator(list)
+  local items = list.items or {}
+  local count = #items
+  if count == 0 then return "0 / 0" end
+  local current = math.floor(tonumber(list.index) or 1)
+  current = standaloneClamp(current, 1, count)
+  return ("%d / %d"):format(current, count)
+end
+
+local function standaloneListLayout(panelH, textScale, titleHeight, bodyHeight,
+  footerHeight, compact)
+  local pad = compact and 6 or 12 * textScale
+  local titleGap = standaloneHeaderGap(pad)
+  local headerH = standaloneHeaderHeight(titleHeight, pad)
+  local footerH = standalonePixel(footerHeight) + pad
+  local dividerSpan = math.max(1, panelH - headerH - footerH)
+  local baseGap = compact and 2 or math.max(4, standalonePixel(pad * 0.35))
+  local listHeight = math.max(1, dividerSpan - baseGap * 2)
+  local minRowH = math.max(1, standalonePixel(bodyHeight + 2))
+  return {
+    pad = pad,
+    titleGap = titleGap,
+    headerH = headerH,
+    footerH = footerH,
+    dividerSpan = dividerSpan,
+    baseGap = baseGap,
+    listHeight = listHeight,
+    minRowH = minRowH,
+    fitsFour = listHeight >= minRowH * 4,
+  }
+end
+
+local function standaloneTextScaleForRows(maxScale, panelH, compact, measure)
+  for textScale = math.max(1, math.floor(maxScale or 1)), 1, -1 do
+    local titleHeight, bodyHeight, footerHeight = measure(textScale)
+    local layout = standaloneListLayout(panelH, textScale,
+      titleHeight, bodyHeight, footerHeight, compact)
+    if layout.fitsFour then return textScale end
+  end
+  return 1
+end
+
+-- The compact presenter is a 160x144 popup, so reserve four slots in its
+-- native list area. Fullscreen keeps its own established responsive rhythm.
+local function standaloneCompactRowLayout(listHeight)
+  local visible = 4
+  return {
+    visible = visible,
+    rowHeight = math.max(1, math.floor(listHeight / visible)),
+  }
+end
+
+local function standaloneDrawBag(game, viewport, list, transform)
+  local G = love.graphics
+  local compact = transform and transform.compact or false
+  local vx, vy, vw, vh = standaloneViewport(viewport)
+  local scale = standaloneScale(vw, vh)
+  local maxTextScale = standaloneTextScale(vw, vh)
+  local margin = compact and 2 or 8 * scale
+  local px, py = vx + margin, vy + margin
+  local panelW, panelH = vw - margin * 2, vh - margin * 2
+  local textScale = standaloneTextScaleForRows(maxTextScale, panelH, compact,
+    function(candidate)
+      local titleFont = standaloneFont(standaloneTitleSize(candidate))
+      local bodyFont = standaloneFont(15 * candidate)
+      local footerScale = math.max(1,
+        math.floor(candidate * 2 / 3 + 0.5))
+      local footerFont = standaloneFont(15 * footerScale)
+      return titleFont:getHeight(), bodyFont:getHeight(), footerFont:getHeight()
+    end)
+  local pad = compact and 6 or 12 * textScale
+  local titleSize = standaloneTitleSize(textScale)
+  local bodySize = 15 * textScale
+  local footerScale = math.max(1, math.floor(textScale * 2 / 3 + 0.5))
+  local footerSize = 15 * footerScale
+  local titleFont, bodyFont, footerFont = standaloneFont(titleSize),
+    standaloneFont(bodySize), standaloneFont(footerSize)
+  local layout = standaloneListLayout(panelH, textScale, titleFont:getHeight(),
+    bodyFont:getHeight(), footerFont:getHeight(), compact)
+  local titleGap = layout.titleGap
+  local headerH = layout.headerH
+  local money = ("¥%d"):format(math.max(0, math.floor(tonumber(
+    game.save and game.save.money or 0) or 0)))
+  local moneyW = math.floor(footerFont:getWidth(money) + 0.5)
+  local footer = list.footer and standaloneFooterText(list.footer) or ""
+  if type(footer) ~= "string" then footer = "" end
+  -- BagMenu supplies the money as its native footer; money is rendered in the
+  -- stable right column here, so use the selected-item indicator on the left.
+  local controlFooter = footer == "" or footer == money
+  if footer == money then footer = "" end
+  local footerGap = compact and 4 or math.max(16, standalonePixel(pad * 0.75))
+  if controlFooter then footer = standaloneItemIndicator(list) end
+  local footerH = layout.footerH
+  local dividerSpan = layout.dividerSpan
+  local baseGap = layout.baseGap
+  local minRowH = layout.minRowH
+  local footerWidth = math.max(1,
+    panelW - pad * 2 - moneyW - footerGap)
+
+  -- The compact presenter is still drawn from the native 160x144 menu grid.
+  -- A 20px row keeps the native footer and header zones intact.  On a small
+  -- fullscreen viewport, text scale is lowered first so four readable rows
+  -- fit without making the pixel font overlap itself.
+  local listHeight = layout.listHeight
+  local rowH, visible
+  if compact then
+    local rows = standaloneCompactRowLayout(listHeight)
+    rowH, visible = rows.rowHeight, rows.visible
+  else
+    rowH = 24 * textScale
+    if listHeight < rowH * 4 then
+      rowH = math.max(minRowH, math.floor(listHeight / 4))
+    end
+    visible = math.max(1, math.floor(listHeight / rowH))
+  end
+  -- Use the same integer gap above the first row and below the last visible
+  -- row.  Any odd leftover pixel is kept on the lower side of the list.
+  local listGap = math.max(baseGap,
+    math.floor((dividerSpan - visible * rowH) / 2))
+  local count = #list.items
+  local selected = standaloneClamp(list.index or 1, 1, math.max(1, count))
+  local scroll = standaloneClamp(list.scroll or 0, 0,
+    math.max(0, count - visible))
+  if selected <= scroll then scroll = selected - 1 end
+  if selected > scroll + visible then scroll = selected - visible end
+
+  G.push("all")
+  G.origin()
+  if transform then
+    G.translate(transform.x, transform.y)
+    G.scale(transform.sx, transform.sy)
+  end
+  G.setColor(0, 0, 0, 1)
+  G.rectangle("fill", vx, vy, vw, vh)
+  G.setColor(1, 1, 1, 1)
+  G.rectangle("fill", px, py, panelW, panelH)
+
+  standaloneDrawText(titleFont, list.title or "ITEMS", px + pad,
+    py + titleGap, { 0, 0, 0, 1 })
+  G.setColor(0.72, 0.72, 0.72, 1)
+  G.rectangle("fill", px + pad, py + headerH,
+    math.max(1, panelW - pad * 2), 2)
+
+  local now = love.timer and love.timer.getTime and love.timer.getTime() or os.clock()
+  local rightGap = math.max(16, standalonePixel(bodySize * 0.65))
+  local leftX = standalonePixel(px + pad + bodySize * 0.9)
+  local listRight = standalonePixel(px + panelW - pad)
+  for slot = 1, visible do
+    local index = scroll + slot
+    local item = list.items[index]
+    if not item then break end
+    local rowY = py + headerH + listGap + (slot - 1) * rowH
+    local rowSelected = index == selected
+    if rowSelected then
+      G.setColor(0.93, 0.93, 0.93, 1)
+      G.rectangle("fill", standalonePixel(px + pad * 0.55), rowY + 4,
+        standalonePixel(panelW - pad * 1.1), rowH - 8)
+      G.setColor(0, 0, 0, 1)
+      local cursorX = standalonePixel(px + pad * 0.68)
+      local cursorY = standalonePixel(rowY + rowH * 0.5)
+      local arrowW = math.max(8, standalonePixel(bodySize * 0.65))
+      local arrowH = math.max(6, standalonePixel(bodySize * 0.5))
+      local stemH = math.max(3, standalonePixel(bodySize * 0.2))
+      local headW = math.max(4, arrowW - math.floor(stemH / 2))
+      local headX = cursorX + arrowW - headW
+      G.rectangle("fill", cursorX, cursorY - math.floor(stemH / 2),
+        math.max(1, headX - cursorX), stemH)
+      -- Build the head from one-pixel horizontal steps so it stays crisp on
+      -- the native grid and works with the engine's minimal graphics stub.
+      local halfH = math.max(1, math.floor((arrowH + 1) / 2))
+      for arrowRow = 0, arrowH - 1 do
+        local distance = math.min(arrowRow + 1, arrowH - arrowRow)
+        local width = math.max(1, standalonePixel(headW * distance / halfH))
+        G.rectangle("fill", headX,
+          cursorY - math.floor(arrowH / 2) + arrowRow, width, 1)
+      end
+    end
+
+    local right = tostring(item.right or "")
+    local rightW = math.floor(bodyFont:getWidth(right) + 0.5)
+    local available = math.max(1,
+      standalonePixel(listRight - rightW - rightGap - leftX))
+    local label = tostring(item.label or item.name or "ITEM")
+    local labelW = standalonePixel(bodyFont:getWidth(label))
+    local textY = math.floor(rowY + (rowH - bodyFont:getHeight()) * 0.5 + 0.5)
+    local textColor = { 0, 0, 0, 1 }
+    if labelW <= available or not rowSelected then
+      standaloneSetScissor(transform, leftX, rowY, available, rowH)
+      standaloneDrawText(bodyFont, label, leftX, textY, textColor)
+      G.setScissor()
+    else
+      local speed = math.max(24, bodySize * 0.75)
+      local prefix = item.prefix
+      local move = item.move
+      if prefix and move then
+        local prefixW = standalonePixel(bodyFont:getWidth(prefix))
+        local moveArea = math.max(1, available - prefixW)
+        standaloneSetScissor(transform, leftX, rowY, available, rowH)
+        standaloneDrawText(bodyFont, prefix, leftX, textY, textColor)
+        standaloneSetScissor(transform, leftX + prefixW, rowY, moveArea, rowH)
+        standaloneDrawText(bodyFont, move,
+          leftX + prefixW + standaloneTickerOffset(now, labelW - available, speed),
+          textY, textColor)
+        G.setScissor()
+      else
+        standaloneSetScissor(transform, leftX, rowY, available, rowH)
+        standaloneDrawText(bodyFont, label,
+          leftX + standaloneTickerOffset(now, labelW - available, speed),
+          textY, textColor)
+        G.setScissor()
+      end
+    end
+    if right ~= "" then
+      standaloneDrawText(bodyFont, right, listRight - rightW, textY, textColor)
+    end
+  end
+
+  G.setColor(0.72, 0.72, 0.72, 1)
+  G.rectangle("fill", px + pad, py + panelH - footerH,
+    math.max(1, panelW - pad * 2), 2)
+  local footerY = py + panelH - footerH + math.floor(pad * 0.25)
+  footer = standaloneFitFooter(footerFont, footer, footerWidth)
+  standaloneDrawText(footerFont, footer, px + pad, footerY,
+    { 0.25, 0.25, 0.25, 1 })
+  standaloneDrawText(footerFont, money, px + panelW - pad - moneyW,
+    footerY,
+    { 0.25, 0.25, 0.25, 1 })
+  G.pop()
+end
+
+local function installStandalonePresentation(mod, session)
+  mod.hooks:wrap("screen.render_visible", function(next, visible, state)
+    local oneArgument = state == nil and type(visible) == "table"
+    if oneArgument then state, visible = visible, true end
+    local game = session.game or (state and state.game)
+    if session.active and state == session.active and game and game.stack
+        and game.stack:top() == state then
+      return false
+    end
+    if oneArgument then return next(state) end
+    return next(visible, state)
+  end, 100)
+
+  mod.hooks:wrap("render.compose", function(next, renderer, ctx)
+    local handled = next(renderer, ctx)
+    local game = session.game
+    if handled ~= true and session.active and game and game.stack
+        and game.stack:top() == session.active and ctx and ctx.uiCanvas
+        and love and love.graphics then
+      if standaloneFullscreenEnabled(mod) then
+        love.graphics.push("all")
+        love.graphics.setCanvas(ctx.uiCanvas)
+        love.graphics.clear(0, 0, 0, 0)
+        love.graphics.pop()
+      end
+    end
+    return handled
+  end, 100)
+
+  mod.hooks:wrap("render.hud", function(next, game, viewport)
+    session.game = game
+    next(game, viewport)
+    if standaloneFullscreenEnabled(mod)
+        and session.active and game and game.stack and game.stack:top() == session.active
+        and love and love.graphics then
+      standaloneDrawBag(game, viewport, session.active)
+    elseif session.active and game and game.stack and game.stack:top() == session.active
+        and love and love.graphics then
+      local renderer = game.renderer
+      local uiw, uih = 160, 144
+      if renderer and renderer.uiSize then uiw, uih = renderer:uiSize() end
+      local gameX = viewport and viewport.gameX or 0
+      local gameY = viewport and viewport.gameY or 0
+      local gameW = viewport and viewport.gameWidth or uiw
+      local gameH = viewport and viewport.gameHeight or uih
+      standaloneDrawBag(game, { width = uiw, height = uih }, session.active, {
+        compact = true,
+        x = gameX,
+        y = gameY,
+        sx = gameW / uiw,
+        sy = gameH / uih,
+      })
+    end
+  end, 100)
+
+  mod.events:on("screen.popped", function(ev)
+    if ev and ev.state and ev.state == session.active and ev.state.__battle then
+      session.lastBattlePocket = POCKETS[ev.state.__pocketIndex].id
+    end
+    if ev and ev.state == session.active then
+      local game = session.game
+      local top = game and game.stack and game.stack:top()
+      if top and top.__usefulBagKind then
+        session.active = top
+        session.game = top.game or game
+      else
+        session.active = nil
+        session.game = nil
+      end
+      session.wantSort = false
+      session.sortOpen = false
+    end
+  end)
+
+  mod.events:on("screen.pushed", function(ev)
+    local state = ev and ev.state
+    if state and state.__usefulBagKind then
+      session.active = state
+      session.game = state.game or session.game
+    end
+  end)
+end
+
 -- ------------------------------------------------ entry chunk
 
 return function(mod)
-  mod.content.constants:patch("bagSize", 999)
-  mod.content.field:patch("pcItemCap", 999)
+  mod.options:define({
+    { key = "fullscreen_menu", label = "FULLSCREEN BAG MENUS",
+      type = "toggle", default = true },
+  })
 
-  -- one bag at a time; the game.ready Input wraps write TAB/R3 here
+  mod.content.constants:patch("bagSize", 999)
+  mod.content.constants:patch("itemStackCap", 999)
+  mod.content.field:patch("pcItemCap", 999)
+  installStackCapacityCompatibility()
+
+  -- one bag at a time; the game.ready Input wraps write TAB/R3/touch SELECT here
   local session = { active = nil, wantSort = false, sortOpen = false }
+  local shopQuantityContext = nil
+  installStandalonePresentation(mod, session)
 
   -- A registered BagMenu wins over the builtin require fallback, so the
   -- start menu and the in-battle bag both get the pocketed list.  The
@@ -653,14 +1191,16 @@ return function(mod)
     local Input = require("src.core.Input")
 
     -- hot reload re-runs entry chunks: wrap each module once
-    if Input.__usefulBag then return end
-    Input.__usefulBag = true
+    if not Input.__usefulBag then
+      Input.__usefulBag = true
 
     local vanillaKey = Input.keypressed
     Input.keypressed = function(self, key)
       -- TAB is bound to SELECT; while the bag is open it means "sort"
       -- instead, and the press is swallowed so it cannot also swap
-      if key == "tab" and session.active and not session.sortOpen then
+      if key == "tab" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
         session.wantSort = true
         return
       end
@@ -669,11 +1209,26 @@ return function(mod)
 
     local vanillaPad = Input.gamepadpressed
     Input.gamepadpressed = function(self, joystick, button)
-      if button == "rightstick" and session.active and not session.sortOpen then
+      if button == "rightstick" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
         session.wantSort = true
         return
       end
       return vanillaPad(self, joystick, button)
+    end
+
+    local vanillaOverlayPressed = Input.overlayPressed
+    Input.overlayPressed = function(self, button)
+      if button == "select" and session.active
+          and session.active.__usefulBagKind == "bag"
+          and not session.sortOpen then
+        session.wantSort = true
+        return
+      end
+      return vanillaOverlayPressed(self, button)
+    end
+
     end
 
     -- the PC's three item lists never got the vanilla SELECT-swap; catch
@@ -684,14 +1239,79 @@ return function(mod)
       local vanillaNew = ListMenu.new
       ListMenu.new = function(game, title, items, opts)
         local list = vanillaNew(game, title, items, opts)
-        if PC_LISTS[list.title] then decoratePcList(list, game) end
+        if PC_LISTS[list.title] then
+          decoratePcList(list, game, session)
+        end
         return list
+      end
+    end
+
+    -- Some Gen 1 shop payloads still give the BUY quantity picker the old
+    -- hard-coded 999 maximum.  Keep the shop UI aligned with the shared
+    -- Bag.add ceiling here, in the mod, so an installed Useful Bag protects
+    -- itself even when the launched engine payload is stale.
+    local function shopFullText(g)
+      local text = g and g.data and g.data.text
+      if type(text) == "table"
+          and type(text._PokemartItemBagFullText) == "string" then
+        return text._PokemartItemBagFullText
+      end
+      return "You can't carry\nany more items."
+    end
+
+    if not ListMenu.__usefulBagShopCapacity then
+      ListMenu.__usefulBagShopCapacity = true
+      local vanillaShopListNew = ListMenu.new
+      ListMenu.new = function(shopGame, title, items, opts)
+        local list = vanillaShopListNew(shopGame, title, items, opts)
+        if title ~= "BUY" or not list or not list.onChoose then
+          return list
+        end
+
+        local vanillaChoose = list.onChoose
+        list.onChoose = function(item, currentList)
+          local itemId = item and item.value
+          local inventory = shopGame.save and shopGame.save.inventory
+          local current = inventory and inventory[itemId] or 0
+          local capacity = stackCapacity(shopGame.data)
+          local remaining = math.max(0, capacity - current)
+          if remaining < 1 then
+            list.footer = shopFullText(shopGame)
+            return
+          end
+
+          local previous = shopQuantityContext
+          shopQuantityContext = {
+            game = shopGame,
+            itemId = itemId,
+            remaining = remaining,
+          }
+          local ok, result = pcall(vanillaChoose, item, currentList)
+          shopQuantityContext = previous
+          if not ok then error(result, 0) end
+          return result
+        end
+        return list
+      end
+    end
+
+    local QuantityBox = require("src.ui.QuantityBox")
+    if not QuantityBox.__usefulBagShopCapacity then
+      QuantityBox.__usefulBagShopCapacity = true
+      local vanillaQuantityNew = QuantityBox.new
+      QuantityBox.new = function(quantityGame, opts)
+        local context = shopQuantityContext
+        if context and context.game == quantityGame and opts then
+          opts.max = math.min(opts.max or context.remaining, context.remaining)
+        end
+        return vanillaQuantityNew(quantityGame, opts)
       end
     end
   end)
 
   mod.exports = {
     POCKETS = POCKETS,
+    stackCapacity = stackCapacity,
     classify = classify,
     pocketItems = pocketItems,
     hiddenOrder = hiddenOrder,
@@ -705,5 +1325,14 @@ return function(mod)
     tickerOffset = tickerOffset,
     labelForItem = labelForItem,
     tickerFor = tickerFor,
+    integerScale = standaloneScale,
+    fontScale = standaloneTextScale,
+    fontSize = standaloneFontSize,
+    titleSize = standaloneTitleSize,
+    footerText = standaloneFooterText,
+    itemIndicator = standaloneItemIndicator,
+    textScaleForRows = standaloneTextScaleForRows,
+    compactRowLayout = standaloneCompactRowLayout,
+    headerHeight = standaloneHeaderHeight,
   }
 end

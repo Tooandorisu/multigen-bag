@@ -6,8 +6,7 @@
 package.path = "./?.lua;./?/init.lua;" .. package.path
 
 local T = require("tests.modkit")
-local Data = require("src.core.Data")
-Data:load()
+local Data = T.fixtures.fresh()
 
 local run = T.sdk.loadMod("mods/useful_bag", { data = Data })
 T.eq(#run.errors, 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
@@ -15,9 +14,30 @@ T.eq(run.mod and run.mod.state, "loaded", "reached the loaded state")
 
 T.eq(Data.constants.bagSize, 999, "bagSize patched to 999")
 T.eq(Data.field.pcItemCap, 999, "pcItemCap patched to 999 (PC storage cap)")
+T.eq(Data.constants.itemStackCap, 999,
+  "itemStackCap patched to 999 (shared bag and PC stack cap)")
 
 local Bag = require("src.inventory.Bag")
 T.eq(Bag.capacity(Data), 999, "Bag.capacity reads the patched constant")
+T.eq(Bag.stackCapacity(Data), 999,
+  "Bag.stackCapacity reads the patched item stack cap")
+
+local stackSave = { inventory = { POTION = 99 }, bagOrder = { "POTION" } }
+T.check(Bag.add(stackSave, "POTION", 1, Data),
+  "an existing item stack can grow past 99")
+T.eq(stackSave.inventory.POTION, 100, "an item stack reaches 100")
+stackSave.inventory.POTION = 998
+T.check(Bag.add(stackSave, "POTION", 1, Data),
+  "an existing item stack can reach 999")
+T.eq(stackSave.inventory.POTION, 999, "an item stack reaches 999")
+T.check(not Bag.add(stackSave, "POTION", 1, Data),
+  "an item stack rejects 1000")
+T.eq(stackSave.inventory.POTION, 999, "a rejected stack addition changes nothing")
+local QuantityBox = require("src.ui.QuantityBox")
+T.eq(QuantityBox.new({}, { max = 99 }).digits, 2,
+  "two-digit quantity boxes keep the vanilla width")
+T.eq(QuantityBox.new({}, { max = 999 }).digits, 3,
+  "three-digit quantity boxes reserve a third digit")
 
 local save = { inventory = {}, bagOrder = {} }
 for i = 1, 20 do
@@ -30,6 +50,55 @@ T.eq(Bag.slots(save), 21, "bag holds 21 distinct items")
 
 local ex = run.loader.exports.useful_bag
 T.neq(ex, nil, "exports reachable")
+T.eq(ex.stackCapacity(Data), 999,
+  "shop capacity helper reads the patched stack limit")
+local nativeStackCapacity = Bag.stackCapacity
+Bag.stackCapacity = nil
+T.eq(ex.stackCapacity(Data), 999,
+  "shop capacity helper falls back when the engine API is absent")
+Bag.stackCapacity = nativeStackCapacity
+local Runtime = require("src.mods.Runtime")
+T.eq(#(run.mod.manifest.optional_dependencies or {}), 0,
+  "the mod has no UI companion dependency")
+T.check(run.loader.optionSchemas.useful_bag
+    and run.loader.optionSchemas.useful_bag[1].key == "fullscreen_menu",
+  "the fullscreen menu toggle is exposed as a mod option")
+T.eq(run.loader.optionSchemas.useful_bag[1].default, true,
+  "the fullscreen presenter remains the default")
+T.check(Runtime.wantsHook("screen.render_visible"),
+  "standalone presenter hides the native bag draw")
+T.check(Runtime.wantsHook("render.compose"),
+  "standalone presenter clears the native UI canvas")
+T.check(Runtime.wantsHook("render.hud"),
+  "standalone presenter draws after the game frame")
+T.eq(ex.integerScale(640, 480), 1, "base viewport uses 1x integer scaling")
+T.eq(ex.integerScale(1280, 960), 2, "2x viewport uses 2x integer scaling")
+T.eq(ex.integerScale(1920, 1080), 2, "wide viewport uses the limiting dimension")
+T.eq(ex.integerScale(2048, 1536), 3, "3x viewport uses 3x integer scaling")
+T.eq(ex.fontScale(320, 240), 1, "tiny viewport keeps a fitting font scale")
+T.eq(ex.fontScale(640, 480), 2, "small window gets readable 2x text")
+T.eq(ex.fontScale(800, 600), 2, "window-sized viewport keeps readable 2x text")
+T.eq(ex.fontScale(360, 800), 2,
+  "portrait phone width rounds up to the next readable text scale")
+T.eq(ex.fontScale(320, 800), 1,
+  "very narrow portrait viewport keeps the minimum text scale")
+T.eq(ex.fontScale(1080, 2400), 4,
+  "tall high-resolution portrait viewport uses the 4x text ceiling")
+T.eq(ex.fontScale(2048, 1536), 3, "large viewport caps at 3x text")
+T.eq(ex.textScaleForRows(3, 220, false, function(scale)
+  return 20 * scale, 15 * scale, 15 * scale
+end), 1,
+"fullscreen type scale drops before fewer than four readable rows remain")
+local fourRows = ex.compactRowLayout(95)
+T.eq(fourRows.visible, 4,
+  "compact list reserves exactly four visible item slots")
+T.eq(fourRows.rowHeight, 23,
+  "compact list distributes its body height across the four slots")
+T.eq(ex.fontSize(16), 15, "Plain Pixel snaps a small font to its design em")
+T.eq(ex.fontSize(48), 45, "Plain Pixel snaps a scaled font to its design em")
+T.eq(ex.headerHeight(120, 24), 138,
+  "header clearance uses a compact divider gap")
+T.eq(ex.titleSize(2), 45, "header uses a smaller grid-snapped font")
 
 -- seed item defs so classify has names + flags to read; the fixture only
 -- carries one of each seam (FIX_POTION/FIX_BALL/FIX_TM/FIX_BADGE)
@@ -68,6 +137,10 @@ T.eq(ex.classify(Data, "EXP_ALL"), "items",
 T.eq(ex.classify(Data, "OLD_ROD"), "key", "OLD_ROD -> key (KeyItemFlags TRUE)")
 T.eq(ex.classify(Data, "POKE_FLUTE"), "key",
   "POKE_FLUTE -> key from the fallback list, no flag set")
+T.eq(ex.classify(Data, "POKE_FLUTE", false), "key",
+  "POKE_FLUTE -> key outside battle")
+T.eq(ex.classify(Data, "POKE_FLUTE", true), "battle",
+  "POKE_FLUTE -> battle in battle")
 T.eq(ex.classify(Data, "SAFARI_BALL"), "key",
   "SAFARI_BALL -> key (KeyItemFlags TRUE), despite being a ball")
 T.eq(ex.classify(Data, "SURFBOARD"), "key", "SURFBOARD -> key")
@@ -136,6 +209,39 @@ local stub = {
 }
 run.loader.events:emit("game.ready", { game = stub })
 
+-- The stock shop flow supplies the quantity picker with its own affordable
+-- maximum.  Keep this probe deliberately engine-shaped so the mod still
+-- enforces the shared stack ceiling when an older shop payload supplies 999.
+local ListMenu = require("src.ui.ListMenu")
+local shopProbeBox
+stub.save.inventory.POTION = 998
+local shopProbe = ListMenu.new(stub, "BUY", {
+  { label = "POTION", value = "POTION" },
+}, {
+  onChoose = function()
+    shopProbeBox = QuantityBox.new(stub, { max = 999, unitPrice = 1 })
+  end,
+})
+shopProbe.onChoose(shopProbe.items[1], shopProbe)
+T.eq(shopProbeBox.max, 1,
+  "shop quantity picker is clamped to the remaining stack capacity")
+stub.save.inventory.POTION = 999
+local blockedShop = ListMenu.new(stub, "BUY", {
+  { label = "POTION", value = "POTION" },
+}, {
+  dialogue = true,
+  onChoose = function()
+    shopProbeBox = "opened"
+  end,
+})
+shopProbeBox = nil
+blockedShop.onChoose(blockedShop.items[1], blockedShop)
+T.eq(shopProbeBox, nil,
+  "shop refuses to open a picker when the stack is already full")
+T.check(blockedShop.footer ~= nil,
+  "shop reports a full stack before opening the picker")
+stub.save.inventory.POTION = nil
+
 -- the mod registers a BagMenu screen, so the list is resolved through the
 -- screens registry (Screens.get), not by requiring the builtin directly
 local Screens = require("src.ui.Screens")
@@ -167,6 +273,7 @@ stub.save.bagOrder = { "POTION", "BICYCLE" }
 local sortBag = Screens.get(stub, "BagMenu").new(stub)
 stack:push(sortBag)
 local Input = require("src.core.Input")
+Input:init()
 Input.keypressed(Input, "tab") -- swallowed by the wrapper -> session.wantSort
 sortBag:update(1 / 60)         -- the bag's update opens the prompt
 T.check(stack:top() ~= sortBag, "TAB pushes the SORT BY NAME / COUNT prompt")
@@ -187,15 +294,22 @@ T.eq(table.concat(stub.save.bagOrder, ","), "POTION,BICYCLE",
 -- a battle bag opens on BATTLE ITEMS and its L/R cycling skips TMs / HMs
 -- (index 4) and KEY ITEMS (index 6), wrapping through the usable pockets
 stub.save = {
-  inventory = { X_ATTACK = 2, POTION = 3, POKE_BALL = 4, TM_01 = 1, BICYCLE = 1 },
-  bagOrder = { "X_ATTACK", "POTION", "POKE_BALL", "TM_01", "BICYCLE" },
+  inventory = {
+    X_ATTACK = 2, POKE_FLUTE = 1, POTION = 3, POKE_BALL = 4,
+    TM_01 = 1, BICYCLE = 1,
+  },
+  bagOrder = {
+    "X_ATTACK", "POKE_FLUTE", "POTION", "POKE_BALL", "TM_01", "BICYCLE",
+  },
   money = 0,
 }
 local battleBag = Screens.get(stub, "BagMenu").new(stub, { battle = {} })
 T.check(battleBag.__battle ~= nil, "battle bag flags itself")
 T.eq(battleBag.title, "BATTLE ITEMS", "battle bag opens on BATTLE ITEMS")
-T.eq(#battleBag.items, 1, "battle bag shows only the X_ATTACK")
-T.eq(battleBag.items[1].value, "X_ATTACK", "X_ATTACK is the sole row")
+T.eq(#battleBag.items, 2, "battle bag shows battle items and the POKE_FLUTE")
+T.eq(battleBag.items[1].value, "X_ATTACK", "X_ATTACK remains the first battle row")
+T.eq(battleBag.items[2].value, "POKE_FLUTE",
+  "POKE_FLUTE is a battle item while in battle")
 
 ex.switchPocket(battleBag, 1) -- battle -> key (skipped) -> wraps to items
 T.eq(battleBag.title, "ITEMS", "RIGHT from BATTLE ITEMS lands on ITEMS, skipping KEY")
@@ -207,6 +321,27 @@ ex.switchPocket(battleBag, 1)
 T.eq(battleBag.title, "BATTLE ITEMS", "RIGHT from POKé BALLS wraps back to BATTLE ITEMS")
 ex.switchPocket(battleBag, -1) -- battle -> tms (skipped) -> balls
 T.eq(battleBag.title, "POKé BALLS", "LEFT from BATTLE ITEMS lands on POKé BALLS, skipping TMs")
+
+-- Battle pocket memory is runtime-only: closing on POKé BALLS makes the next
+-- battle bag reopen there, but an empty remembered pocket falls back to the
+-- existing battle priority.
+stack:push(battleBag)
+stack:pop()
+stub.save = {
+  inventory = { X_ATTACK = 2, POTION = 3, POKE_BALL = 4 },
+  bagOrder = { "X_ATTACK", "POTION", "POKE_BALL" }, money = 0,
+}
+local rememberedBag = Screens.get(stub, "BagMenu").new(stub, { battle = {} })
+T.eq(rememberedBag.title, "POKé BALLS",
+  "battle bag reopens on the last runtime battle pocket")
+rememberedBag:close()
+stub.save = {
+  inventory = { X_ATTACK = 2, POTION = 3 },
+  bagOrder = { "X_ATTACK", "POTION" }, money = 0,
+}
+local emptyRememberedBag = Screens.get(stub, "BagMenu").new(stub, { battle = {} })
+T.eq(emptyRememberedBag.title, "BATTLE ITEMS",
+  "an empty remembered battle pocket falls back to battle priority")
 
 -- empty BATTLE ITEMS falls back to the first non-empty usable pocket
 stub.save = { inventory = { POTION = 3, POKE_BALL = 4 },
@@ -222,6 +357,17 @@ T.check(not owBag.__battle, "overworld bag is not battle-flagged")
 T.eq(owBag.title, "ITEMS", "overworld bag still opens on ITEMS")
 ex.switchPocket(owBag, 1)
 T.eq(owBag.title, "MEDICINE", "overworld bag still cycles to MEDICINE")
+
+-- Touchscreen SELECT is the bag sort shortcut; keyboard/controller SELECT
+-- remains the row-swap path.
+local touchBag = Screens.get(stub, "BagMenu").new(stub)
+stack:push(touchBag)
+Input.overlayPressed(Input, "select")
+touchBag:update(1 / 60)
+T.check(stack:top() ~= touchBag,
+  "touchscreen SELECT opens the sort prompt in the bag")
+Input.overlayReleased(Input, "select")
+stack:pop()
 
 -- ------------------------------------------------ sort feature
 
@@ -295,7 +441,6 @@ local stubPc = {
   input = { wasPressed = function() return false end,
             isDown = function() return false end },
 }
-local ListMenu = require("src.ui.ListMenu")
 local withdraw = ListMenu.new(stubPc, "WITHDRAW ITEM", {
   { value = "POTION", label = "Potion" },
   { value = "REPEL", label = "Repel" },
@@ -332,6 +477,39 @@ deposit.onSelectKey(deposit.items[3], deposit) -- swap with POKE_BALL
 T.eq(table.concat(stubDep.save.bagOrder, ","), "POKE_BALL,POTION,REPEL",
   "deposit swap writes save.bagOrder (the bag)")
 T.eq(deposit.items[1].value, "POKE_BALL", "deposit rows reordered after the swap")
+stubDep.stack = stack
+stack:push(deposit)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, deposit), false,
+  "the fullscreen presenter hides the native deposit list")
+stack:pop()
+
+-- PC deposits use the same shared stack cap: adding two items to an existing
+-- x998 PC stack is rejected without removing anything from the bag.
+local PlayerPC = require("src.ui.PlayerPC")
+local pcCapStack = setmetatable({}, { __index = StateStack })
+pcCapStack:init()
+local pcCapGame = {
+  save = {
+    inventory = { POTION = 2 }, bagOrder = { "POTION" },
+    pcItems = { POTION = 998 },
+  },
+  data = Data,
+  stack = pcCapStack,
+  input = { wasPressed = function() return false end,
+            isDown = function() return false end },
+}
+local pcMenu = PlayerPC.new(pcCapGame)
+pcMenu.items[2].onSelect() -- DEPOSIT ITEM
+local cappedDeposit = pcCapStack:top()
+T.eq(cappedDeposit.title, "DEPOSIT ITEM", "PC opens the deposit list")
+cappedDeposit.onChoose(cappedDeposit.items[1], cappedDeposit)
+local cappedQuantity = pcCapStack:top()
+cappedQuantity.onDone(2)
+T.eq(pcCapGame.save.pcItems.POTION, 998,
+  "PC deposit refuses to exceed the shared x999 cap")
+T.eq(pcCapGame.save.inventory.POTION, 2,
+  "a rejected PC deposit leaves the bag unchanged")
 
 -- A also completes a pending swap instead of starting the action
 local onChooseCalled = false
@@ -393,6 +571,21 @@ local withdrawTm = ListMenu.new(stubTm, "WITHDRAW ITEM", {
 })
 T.eq(withdrawTm.items[1].label, "FIX TM01 FIX CUT",
   "the PC row shows the full TM name")
+T.eq(ex.footerText("COIN CASE was\nstored via PC."),
+  "COIN CASE was stored via PC.",
+  "PC feedback is flattened into one fullscreen footer line")
+T.eq(ex.itemIndicator({ index = 1, items = { "A", "B", "C" } }), "1 / 3",
+  "footer indicator shows the selected item and list size")
+T.eq(ex.itemIndicator({ index = 99, items = { "A", "B", "C" } }), "3 / 3",
+  "footer indicator clamps a stale selection to the list")
+T.eq(ex.itemIndicator({ index = 1, items = {} }), "0 / 0",
+  "footer indicator handles an empty list")
+stubTm.stack = stack
+stack:push(withdrawTm)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, withdrawTm), false,
+  "the fullscreen presenter hides the native withdraw list")
+stack:pop()
 
 -- ticker geometry: labels that fit stay static, wide ones scroll
 T.eq(ex.tickerFor("FIX POTION", "x1"), nil,
@@ -431,6 +624,17 @@ T.eq(withdrawTm.items[1].move, "FIX CUT",
 -- the bag row carries the same split
 T.eq(tmBag.items[1].move, "FIX CUT",
   "the bag row carries the move name too")
+
+-- ---------------------------------- standalone presenter seam
+stack:push(tmBag)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, tmBag), false, "standalone presenter hides the native bag draw")
+local hudOk = pcall(function()
+  Runtime.call("render.hud", function() end, stub,
+    { width = 640, height = 576 })
+end)
+T.check(hudOk, "standalone presenter draws the fullscreen bag")
+stack:pop()
 
 -- pacing: hold at the head, scroll out, hold, scroll back
 local to = ex.tickerOffset

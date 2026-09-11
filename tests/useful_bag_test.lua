@@ -484,6 +484,45 @@ T.eq(Runtime.call("screen.render_visible", function() return true end,
   "the fullscreen presenter hides the native deposit list")
 stack:pop()
 
+-- Current engines identify the PC item lists with a localization-independent
+-- `kind` and no title.  Matching the title alone left them undecorated, so
+-- they lost the fullscreen presenter and the SELECT swap; the kind (or the
+-- legacy title) must select the same decoration.
+local kindStub = {
+  save = { pcItems = { POKE_BALL = 5, POTION = 3, REPEL = 2 }, bagOrder = {} },
+  data = Data,
+  input = { wasPressed = function() return false end,
+            isDown = function() return false end },
+}
+local kindWithdraw = ListMenu.new(kindStub, nil, {
+  { value = "POTION", label = "Potion" },
+  { value = "REPEL", label = "Repel" },
+  { value = "POKE_BALL", label = "Poké Ball" },
+}, { kind = "pc_item_withdraw" })
+T.eq(kindWithdraw.__usefulBagKind, "pc",
+  "a kind-identified withdraw list is decorated")
+T.check(kindWithdraw.onSelectKey ~= nil,
+  "a kind-identified withdraw list gets the SELECT-swap")
+T.eq(kindWithdraw.items[1].value, "POKE_BALL",
+  "a kind-identified withdraw list follows pcOrder")
+
+local kindDepStub = {
+  save = { inventory = { POTION = 3, REPEL = 2, POKE_BALL = 5 },
+           bagOrder = { "REPEL", "POTION", "POKE_BALL" }, pcItems = {} },
+  data = Data,
+  input = { wasPressed = function() return false end,
+            isDown = function() return false end },
+}
+local kindDeposit = ListMenu.new(kindDepStub, nil, {
+  { value = "POTION", label = "Potion" },
+  { value = "REPEL", label = "Repel" },
+  { value = "POKE_BALL", label = "Poké Ball" },
+}, { kind = "pc_item_deposit" })
+T.eq(kindDeposit.__usefulBagKind, "pc",
+  "a kind-identified deposit list is decorated")
+T.eq(kindDeposit.items[1].value, "REPEL",
+  "a kind-identified deposit list follows bagOrder")
+
 -- PC deposits use the same shared stack cap: adding two items to an existing
 -- x998 PC stack is rejected without removing anything from the bag.
 local PlayerPC = require("src.ui.PlayerPC")
@@ -634,6 +673,53 @@ local hudOk = pcall(function()
     { width = 640, height = 576 })
 end)
 T.check(hudOk, "standalone presenter draws the fullscreen bag")
+
+-- USE / TOSS pushes a child Menu above the bag.  The fullscreen presenter must
+-- keep the bag hidden and redraw that child over the custom bag instead of
+-- exposing the vanilla bag underneath it.
+local overlayDraws = 0
+local useToss = {
+  isOpaque = false,
+  draw = function() overlayDraws = overlayDraws + 1 end,
+}
+stack:push(useToss)
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, tmBag), false,
+  "fullscreen presenter hides the native bag under the USE/TOSS submenu")
+Runtime.call("render.hud", function() end, stub, { width = 640, height = 576 })
+T.eq(overlayDraws, 1,
+  "fullscreen presenter redraws the USE/TOSS submenu over the bag")
+stack:pop()
+stack:pop()
+
+-- The presenter follows the live stack, so a state that left it without the
+-- close event we expect (a clear, a hand-managed pop) can never keep a blank
+-- fullscreen panel up over the game.
+stub.save = { inventory = { POTION = 2 }, bagOrder = { "POTION" }, money = 0 }
+local staleBag = Screens.get(stub, "BagMenu").new(stub)
+stack:push(staleBag)
+Runtime.call("render.hud", function() end, stub, { width = 640, height = 576 })
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, staleBag), false, "presenter is active while its state is on the stack")
+table.remove(stack.states) -- a pop that skipped screen.popped
+Runtime.call("render.hud", function() end, stub, { width = 640, height = 576 })
+T.eq(Runtime.call("screen.render_visible", function() return true end,
+  true, staleBag), true,
+  "a presenter whose state left the stack drops its overlay")
+
+-- A child draw that throws must not skip the presenter's pop and leak its
+-- transform/scissor into the next frame (the engine keeps the frame after a
+-- hook error, so an unbalanced push would outlive it).
+stub.save = { inventory = { POTION = 2 }, bagOrder = { "POTION" }, money = 0 }
+local guardBag = Screens.get(stub, "BagMenu").new(stub)
+stack:push(guardBag)
+stack:push({ isOpaque = false, game = stub,
+  draw = function() error("child boom") end })
+local guardOk = pcall(function()
+  Runtime.call("render.hud", function() end, stub, { width = 640, height = 576 })
+end)
+T.check(guardOk, "a throwing child does not escape the fullscreen presenter")
+stack:pop()
 stack:pop()
 
 -- pacing: hold at the head, scroll out, hold, scroll back

@@ -481,6 +481,34 @@ local function decorateTickers(list)
   end
 end
 
+-- The screen Useful Bag presents is always the topmost state on the LIVE
+-- stack that carries one of the mod's markers.  Deriving it from the stack
+-- rather than trusting the value cached when a screen was built or pushed is
+-- what lets an overlay disappear the same frame its state leaves the stack --
+-- the engine's own B / onCancel pop, a stack clear on a save load, and an
+-- item flow that closes the bag while a child is still on top all move the
+-- marker with the stack.  A marker that outlived its state drew a blank
+-- fullscreen panel that no input could dismiss.
+local function refreshPresentation(session, game)
+  local stack = game and game.stack
+  local states = stack and stack.states
+  local active, index
+  if type(states) == "table" then
+    for i = #states, 1, -1 do
+      local state = states[i]
+      if state and state.__usefulBagKind then
+        active, index = state, i
+        break
+      end
+    end
+  end
+  session.active = active
+  if active then
+    session.game = active.game or game or session.game
+  end
+  return active, index
+end
+
 -- Decorate a vanilla bag ListMenu with pockets, L/R navigation, a
 -- pocket-safe SELECT reorder and the sort/wrap behavior.  `session` is the
 -- shared bag-session state (one bag open at a time) that the game.ready
@@ -609,11 +637,13 @@ local function decorate(list, game, session, opts)
     if self.__battle then
       session.lastBattlePocket = POCKETS[self.__pocketIndex].id
     end
-    if session.active == self then
-      session.active = nil
-      session.game = nil
-    end
-    return vanillaClose(self, ...)
+    local result = vanillaClose(self, ...)
+    -- Derive the presenter from what actually happened: ListMenu:close only
+    -- pops when this list is the top state, so a close requested from under a
+    -- child (an item flow) must NOT drop the overlay while the list is still
+    -- on the stack.
+    refreshPresentation(session, self.game or game)
+    return result
   end
 
   -- full TM/HM labels scroll when they overflow their row window
@@ -654,13 +684,46 @@ end
 -- the bag (save.bagOrder) because that list shows the bag, matching the
 -- original.  The list opens in the stored order (not the engine's
 -- alphabetical sort) so a reorder persists visibly across reopening.
-local PC_LISTS = { ["WITHDRAW ITEM"] = true, ["DEPOSIT ITEM"] = true, ["TOSS ITEM"] = true }
+-- Current engines identify these lists with the localization-independent
+-- `state.kind` ids documented for screen.render_visible; older Gen 1
+-- payloads only carried a title, so keep both spellings.  Matching on the
+-- title alone was a silent failure on a build that supplies `kind`: the
+-- list was never decorated, so it lost both the fullscreen presenter and
+-- the SELECT swap.
+local PC_LIST_KINDS = {
+  pc_item_withdraw = true,
+  pc_item_deposit = true,
+  pc_item_toss = true,
+}
+local PC_LIST_TITLES = {
+  ["WITHDRAW ITEM"] = true,
+  ["DEPOSIT ITEM"] = true,
+  ["TOSS ITEM"] = true,
+}
+-- The fullscreen presenter prints a header; a kind-identified list arrives
+-- with no title (the localized prompt lives in its footer), so give it the
+-- same display title the older title-carrying builds had.
+local PC_LIST_KIND_TITLES = {
+  pc_item_withdraw = "WITHDRAW ITEM",
+  pc_item_deposit = "DEPOSIT ITEM",
+  pc_item_toss = "TOSS ITEM",
+}
+
+local function isPcItemList(list)
+  return list and (PC_LIST_KINDS[list.kind] or PC_LIST_TITLES[list.title]) or false
+end
+
+local function isDepositList(list)
+  return list and (list.kind == "pc_item_deposit"
+    or list.title == "DEPOSIT ITEM")
+end
 
 local function decoratePcList(list, game, session)
   session.game = game
   session.active = list
   list.__usefulBagKind = "pc"
-  local order = list.title == "DEPOSIT ITEM"
+  list.title = list.title or PC_LIST_KIND_TITLES[list.kind] or list.kind
+  local order = isDepositList(list)
     and Bag.order(game.save)   -- the deposit list shows the bag
     or pcOrder(game.save)      -- withdraw / toss show the PC storage
   list.__order = order
@@ -972,6 +1035,9 @@ local function standaloneDrawBag(game, viewport, list, transform)
 
   G.push("all")
   G.origin()
+  -- The engine can leave a scissor set (its letterbox/playfield clip); the
+  -- presenter owns the whole window, so start from an unclipped state.
+  G.setScissor()
   if transform then
     G.translate(transform.x, transform.y)
     G.scale(transform.sx, transform.sy)
@@ -1074,13 +1140,70 @@ local function standaloneDrawBag(game, viewport, list, transform)
   G.pop()
 end
 
+-- The bag stays on the stack while USE/TOSS, quantity, confirmation, and
+-- message states sit above it.  The presenter must keep owning the bag layer
+-- for those non-opaque children; checking only stack:top() exposes the
+-- engine's 160x144 BagMenu as soon as one of them opens.
+local function stackIndex(game, target)
+  local stack = game and game.stack
+  local states = stack and stack.states
+  if type(states) == "table" then
+    for i, state in ipairs(states) do
+      if state == target then return i end
+    end
+    return nil
+  end
+  if stack and stack.top and stack:top() == target then return 1 end
+  return nil
+end
+
+local function hasOpaqueChild(game, index)
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" then return false end
+  for i = index + 1, #states do
+    if states[i] and states[i].isOpaque then return true end
+  end
+  return false
+end
+
+-- render.hud runs after the normal frame has already been composed.  When a
+-- non-opaque child is above the bag, redraw those child states after the
+-- fullscreen bag so the USE/TOSS box remains visible instead of being covered.
+local function redrawChildren(game, index, viewport)
+  local states = game and game.stack and game.stack.states
+  if type(states) ~= "table" or index >= #states then return end
+  local G = love and love.graphics
+  if not G then return end
+  local sx = (viewport and viewport.gameWidth or 160) / 160
+  local sy = (viewport and viewport.gameHeight or 144) / 144
+  G.push("all")
+  G.origin()
+  G.setScissor()
+  G.translate(viewport and viewport.gameX or 0, viewport and viewport.gameY or 0)
+  G.scale(sx, sy)
+  for i = index + 1, #states do
+    local state = states[i]
+    if state and state.draw then
+      -- A child that throws (a missing asset, a broken mod screen) must not
+      -- skip the pop below and leak this transform/scissor into the next
+      -- frame: the engine's hook guard logs the throw and keeps the frame,
+      -- so an unbalanced push here would outlive the error.
+      local ok, err = pcall(state.draw, state)
+      if not ok then
+        require("src.core.Logger").warn(
+          "[useful_bag] child draw failed: %s", tostring(err))
+      end
+    end
+  end
+  G.pop()
+end
+
 local function installStandalonePresentation(mod, session)
   mod.hooks:wrap("screen.render_visible", function(next, visible, state)
     local oneArgument = state == nil and type(visible) == "table"
     if oneArgument then state, visible = visible, true end
     local game = session.game or (state and state.game)
-    if session.active and state == session.active and game and game.stack
-        and game.stack:top() == state then
+    if session.active and state == session.active and stackIndex(game, state) then
       return false
     end
     if oneArgument then return next(state) end
@@ -1096,6 +1219,11 @@ local function installStandalonePresentation(mod, session)
       if standaloneFullscreenEnabled(mod) then
         love.graphics.push("all")
         love.graphics.setCanvas(ctx.uiCanvas)
+        -- clear() honours the active scissor, and the engine's letterbox /
+        -- playfield cutout can leave one set; without this reset only part of
+        -- the canvas clears and the rest keeps its opaque white, which the
+        -- presenter then shows as a blank square.
+        love.graphics.setScissor()
         love.graphics.clear(0, 0, 0, 0)
         love.graphics.pop()
       end
@@ -1106,26 +1234,29 @@ local function installStandalonePresentation(mod, session)
   mod.hooks:wrap("render.hud", function(next, game, viewport)
     session.game = game
     next(game, viewport)
-    if standaloneFullscreenEnabled(mod)
-        and session.active and game and game.stack and game.stack:top() == session.active
-        and love and love.graphics then
-      standaloneDrawBag(game, viewport, session.active)
-    elseif session.active and game and game.stack and game.stack:top() == session.active
-        and love and love.graphics then
-      local renderer = game.renderer
-      local uiw, uih = 160, 144
-      if renderer and renderer.uiSize then uiw, uih = renderer:uiSize() end
-      local gameX = viewport and viewport.gameX or 0
-      local gameY = viewport and viewport.gameY or 0
-      local gameW = viewport and viewport.gameWidth or uiw
-      local gameH = viewport and viewport.gameHeight or uih
-      standaloneDrawBag(game, { width = uiw, height = uih }, session.active, {
-        compact = true,
-        x = gameX,
-        y = gameY,
-        sx = gameW / uiw,
-        sy = gameH / uih,
-      })
+    -- Re-derive from the live stack every frame: a state that left the stack
+    -- without the event we expected must not keep its blank overlay up.
+    local active, index = refreshPresentation(session, game)
+    if index and not hasOpaqueChild(game, index) and love and love.graphics then
+      if standaloneFullscreenEnabled(mod) then
+        standaloneDrawBag(game, viewport, active)
+      else
+        local renderer = game.renderer
+        local uiw, uih = 160, 144
+        if renderer and renderer.uiSize then uiw, uih = renderer:uiSize() end
+        local gameX = viewport and viewport.gameX or 0
+        local gameY = viewport and viewport.gameY or 0
+        local gameW = viewport and viewport.gameWidth or uiw
+        local gameH = viewport and viewport.gameHeight or uih
+        standaloneDrawBag(game, { width = uiw, height = uih }, active, {
+          compact = true,
+          x = gameX,
+          y = gameY,
+          sx = gameW / uiw,
+          sy = gameH / uih,
+        })
+      end
+      redrawChildren(game, index, viewport)
     end
   end, 100)
 
@@ -1133,27 +1264,19 @@ local function installStandalonePresentation(mod, session)
     if ev and ev.state and ev.state == session.active and ev.state.__battle then
       session.lastBattlePocket = POCKETS[ev.state.__pocketIndex].id
     end
-    if ev and ev.state == session.active then
-      local game = session.game
-      local top = game and game.stack and game.stack:top()
-      if top and top.__usefulBagKind then
-        session.active = top
-        session.game = top.game or game
-      else
-        session.active = nil
-        session.game = nil
-      end
-      session.wantSort = false
-      session.sortOpen = false
-    end
+    -- Any pop can change which marked screen is topmost, not just the pop of
+    -- the currently presented one: a PC list can sit above a bag, and a
+    -- stack clear unwinds several states at once.  Re-derive instead of only
+    -- reacting to ev.state == session.active.
+    local game = ev and ev.state and ev.state.game or session.game
+    refreshPresentation(session, game)
+    session.wantSort = false
+    session.sortOpen = false
   end)
 
   mod.events:on("screen.pushed", function(ev)
     local state = ev and ev.state
-    if state and state.__usefulBagKind then
-      session.active = state
-      session.game = state.game or session.game
-    end
+    refreshPresentation(session, (state and state.game) or session.game)
   end)
 end
 
@@ -1239,7 +1362,7 @@ return function(mod)
       local vanillaNew = ListMenu.new
       ListMenu.new = function(game, title, items, opts)
         local list = vanillaNew(game, title, items, opts)
-        if PC_LISTS[list.title] then
+        if isPcItemList(list) then
           decoratePcList(list, game, session)
         end
         return list

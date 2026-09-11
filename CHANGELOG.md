@@ -2,6 +2,25 @@
 
 Useful Bag changes, newest first.
 
+## [2.6.4] - 2026-09-10
+
+### Fixed
+
+- Closing the bag now removes the fullscreen panel on the same frame. The
+  presenter follows the live screen stack instead of a value cached when the
+  screen was built, so a close that happens under a child (an item flow), a
+  stack clear on a save load, or any other path that unwinds the state drops
+  the overlay with it instead of leaving a blank white panel over the game.
+- The presenter clears the scissor before drawing, so a scissor left set by
+  the engine's letterbox or display cutout can no longer clip the panel or
+  its canvas clear on Android.
+- PC WITHDRAW / DEPOSIT / TOSS lists are matched by their stable `kind` id
+  as well as the legacy title, restoring the fullscreen presenter and the
+  SELECT swap on engine builds that hand those lists a `nil` title.
+- A child screen (USE/TOSS, quantity, confirmation) that throws while being
+  redrawn no longer skips the presenter's state restore and leaks its
+  transform into later frames.
+
 ## [2.6.3] - 2026-08-23
 
 ### Fixed

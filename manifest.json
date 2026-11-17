@@ -1,7 +1,7 @@
 {
-  "id": "useful_bag",
-  "name": "Useful Bag",
-  "version": "2.6.4",
+  "id": "multigen_bag",
+  "name": "MultiGen Bag",
+  "version": "0.35.0",
   "api": 2,
   "entry": "main.lua",
   "profile": "content",
@@ -13,7 +13,14 @@
   ],
   "dependencies": [],
   "optional_dependencies": [],
-  "conflicts": [],
-  "description": "999-capacity bag auto-sorted into six pockets (Items, Medicine, Pok\u00e9 Balls, TMs / HMs, Battle Items, Key Items) cycled with Left/Right, plus TAB / R3 (right stick) to sort by name or count. Fullscreen bag and PC menus can be switched back to the base-game pop-out style in mod options.",
-  "github": "ShaneMcGovernIE/useful-bag"
+  "conflicts": [
+    "useful_bag"
+  ],
+  "description": "Fork of Useful Bag by Paperboi for Gen 1-3. Gen 1: 999-slot bag with six auto-sorted pockets. Gen 2/3: 999-slot pockets and item PC, sorting, battle-aware pockets.",
+  "github": "Tooandorisu/multigen-bag",
+  "games": [
+    "gen1",
+    "gen2",
+    "gen3"
+  ]
 }

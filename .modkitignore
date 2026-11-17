@@ -1,1 +1,3 @@
-tests/useful_bag_test.lua
+tests/multigen_bag_test.lua
+tests/gen2_test.lua
+tests/gen3_test.lua

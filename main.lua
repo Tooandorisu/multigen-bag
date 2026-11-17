@@ -1,4 +1,4 @@
--- Useful Bag: 999-capacity bag with auto-sorted pockets.
+-- MultiGen Bag (fork of Useful Bag by Paperboi): 999-capacity bag with auto-sorted pockets.
 --
 -- The bag is split into six pockets -- ITEMS, MEDICINE, POKé BALLS,
 -- TMs / HMs, BATTLE ITEMS and KEY ITEMS -- that the player cycles with
@@ -48,6 +48,45 @@
 -- move name scrolls as the horizontal ticker (the MoveRelearn pacing the
 -- other option-row mods use) when it is too wide for the row window.
 
+-- Gen 2 and Gen 3 already have pockets, so they get their own, smaller half
+-- of the mod (gen2.lua / gen3.lua): bigger pockets, START to sort, and the
+-- cursor wrap, on top of the engine's own PACK / BAG screens.  Everything
+-- below this block is the Gen 1 bag and only ever runs on Red/Blue/Yellow.
+local function generation()
+  local ok, GameVersion = pcall(require, "src.core.GameVersion")
+  if not ok or type(GameVersion) ~= "table"
+      or type(GameVersion.generation) ~= "function" then
+    return 1
+  end
+  local okG, gen = pcall(GameVersion.generation)
+  return okG and tonumber(gen) or 1
+end
+
+local GENERATION = generation()
+if GENERATION == 2 or GENERATION == 3 then
+  local file = GENERATION == 2 and "gen2.lua" or "gen3.lua"
+  return function(mod)
+    mod.options:define({
+      { key = "bigger_pockets", label = "BIGGER POCKETS",
+        type = "toggle", default = true },
+    })
+    local source = assert(mod:read(file), "multigen_bag: missing " .. file)
+    local half = assert(load(source, "@multigen_bag/" .. file))()
+    -- Installed once the game exists, so the engine has loaded its own PACK
+    -- / BAG modules first; install is idempotent across new games.
+    local status = { generation = GENERATION, pending = true }
+    mod.events:on("game.ready", function()
+      local ok, result = pcall(half.install, mod)
+      status = ok and result or { generation = GENERATION, error = tostring(result) }
+    end)
+    mod.exports = {
+      generation = GENERATION,
+      status = function() return status end,
+      half = half,
+    }
+  end
+end
+
 local Bag = require("src.inventory.Bag")
 local USEFUL_STACK_CAP = 999
 local nativeStackCapacity = Bag.stackCapacity
@@ -79,10 +118,24 @@ local function installStackCapacityCompatibility()
   if type(Bag.add) ~= "function" then return end
   local vanillaAdd = Bag.add
   Bag.__usefulBagVanillaAdd = vanillaAdd
+  local function isBadge(id)
+    if type(Bag.isBadge) == "function" then return Bag.isBadge(id) end
+    return type(id) == "string" and id:find("BADGE", 1, true) ~= nil
+  end
+  -- Newer engines split a Gen 1 item into x99 stacks across several slots
+  -- (src/inventory/Bag.lua slotsFor), so a 1000th POTION would quietly open
+  -- an eleventh stack.  x999 is the per-item total the shop clamp and the
+  -- README promise, so it is enforced here for both engine shapes.
+  local function overCap(store, id, amount, data)
+    if isBadge(id) or not store then return false end
+    local have = tonumber(store[id]) or 0
+    return have + amount > stackCapacity(data)
+  end
   Bag.add = function(save, id, qty, data)
     local inventory = save and save.inventory
     local before = inventory and inventory[id]
     local amount = tonumber(qty) or 1
+    if amount > 0 and overCap(inventory, id, amount, data) then return false end
     if vanillaAdd(save, id, qty, data) then return true end
 
     -- A new stack must continue to obey the engine's distinct-slot rules.
@@ -95,6 +148,18 @@ local function installStackCapacityCompatibility()
     if before + amount > stackCapacity(data) then return false end
     inventory[id] = before + amount
     return true
+  end
+
+  if type(Bag.pcAdd) == "function" then
+    local vanillaPcAdd = Bag.pcAdd
+    Bag.__usefulBagVanillaPcAdd = vanillaPcAdd
+    Bag.pcAdd = function(save, id, qty, data, cap)
+      local amount = tonumber(qty) or 1
+      if save and amount > 0 and overCap(save.pcItems, id, amount, data) then
+        return false
+      end
+      return vanillaPcAdd(save, id, qty, data, cap)
+    end
   end
 end
 
@@ -481,7 +546,7 @@ local function decorateTickers(list)
   end
 end
 
--- The screen Useful Bag presents is always the topmost state on the LIVE
+-- The screen MultiGen Bag presents is always the topmost state on the LIVE
 -- stack that carries one of the mod's markers.  Deriving it from the stack
 -- rather than trusting the value cached when a screen was built or pushed is
 -- what lets an overlay disappear the same frame its state leaves the stack --
@@ -766,7 +831,7 @@ end
 
 -- ------------------------------------------------ standalone presentation
 
--- Useful Bag owns its presentation so it does not need a companion UI mod.
+-- MultiGen Bag owns its presentation so it does not need a companion UI mod.
 -- The engine keeps ListMenu as the input/state owner; these hooks only hide
 -- its 160x144 draw and paint the current bag state after the normal frame.
 local standaloneFonts = {}
@@ -1191,7 +1256,7 @@ local function redrawChildren(game, index, viewport)
       local ok, err = pcall(state.draw, state)
       if not ok then
         require("src.core.Logger").warn(
-          "[useful_bag] child draw failed: %s", tostring(err))
+          "[multigen_bag] child draw failed: %s", tostring(err))
       end
     end
   end
@@ -1371,7 +1436,7 @@ return function(mod)
 
     -- Some Gen 1 shop payloads still give the BUY quantity picker the old
     -- hard-coded 999 maximum.  Keep the shop UI aligned with the shared
-    -- Bag.add ceiling here, in the mod, so an installed Useful Bag protects
+    -- Bag.add ceiling here, in the mod, so an installed MultiGen Bag protects
     -- itself even when the launched engine payload is stale.
     local function shopFullText(g)
       local text = g and g.data and g.data.text

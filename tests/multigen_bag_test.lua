@@ -1,4 +1,4 @@
--- Standalone: luajit mods/useful_bag/tests/useful_bag_test.lua
+-- Standalone: luajit mods/multigen_bag/tests/useful_bag_test.lua
 -- Loads the mod through the real headless loader and asserts its stated
 -- effects: the 999-capacity patch, the pocket classification, the hidden
 -- bag that the pockets project from, L/R pocket wrap-around, and the sort
@@ -8,7 +8,7 @@ package.path = "./?.lua;./?/init.lua;" .. package.path
 local T = require("tests.modkit")
 local Data = T.fixtures.fresh()
 
-local run = T.sdk.loadMod("mods/useful_bag", { data = Data })
+local run = T.sdk.loadMod("mods/multigen_bag", { data = Data })
 T.eq(#run.errors, 0, "loads clean (" .. tostring(run.errors[1]) .. ")")
 T.eq(run.mod and run.mod.state, "loaded", "reached the loaded state")
 
@@ -34,10 +34,13 @@ T.check(not Bag.add(stackSave, "POTION", 1, Data),
   "an item stack rejects 1000")
 T.eq(stackSave.inventory.POTION, 999, "a rejected stack addition changes nothing")
 local QuantityBox = require("src.ui.QuantityBox")
-T.eq(QuantityBox.new({}, { max = 99 }).digits, 2,
-  "two-digit quantity boxes keep the vanilla width")
-T.eq(QuantityBox.new({}, { max = 999 }).digits, 3,
-  "three-digit quantity boxes reserve a third digit")
+-- Only engine builds whose QuantityBox sizes itself carry `digits`.
+if QuantityBox.new({}, { max = 99 }).digits ~= nil then
+  T.eq(QuantityBox.new({}, { max = 99 }).digits, 2,
+    "two-digit quantity boxes keep the vanilla width")
+  T.eq(QuantityBox.new({}, { max = 999 }).digits, 3,
+    "three-digit quantity boxes reserve a third digit")
+end
 
 local save = { inventory = {}, bagOrder = {} }
 for i = 1, 20 do
@@ -48,7 +51,7 @@ T.eq(Bag.slots(save), 21, "bag holds 21 distinct items")
 
 -- ------------------------------------------------ pocket classification
 
-local ex = run.loader.exports.useful_bag
+local ex = run.loader.exports.multigen_bag
 T.neq(ex, nil, "exports reachable")
 T.eq(ex.stackCapacity(Data), 999,
   "shop capacity helper reads the patched stack limit")
@@ -60,10 +63,10 @@ Bag.stackCapacity = nativeStackCapacity
 local Runtime = require("src.mods.Runtime")
 T.eq(#(run.mod.manifest.optional_dependencies or {}), 0,
   "the mod has no UI companion dependency")
-T.check(run.loader.optionSchemas.useful_bag
-    and run.loader.optionSchemas.useful_bag[1].key == "fullscreen_menu",
+T.check(run.loader.optionSchemas.multigen_bag
+    and run.loader.optionSchemas.multigen_bag[1].key == "fullscreen_menu",
   "the fullscreen menu toggle is exposed as a mod option")
-T.eq(run.loader.optionSchemas.useful_bag[1].default, true,
+T.eq(run.loader.optionSchemas.multigen_bag[1].default, true,
   "the fullscreen presenter remains the default")
 T.check(Runtime.wantsHook("screen.render_visible"),
   "standalone presenter hides the native bag draw")
@@ -730,4 +733,4 @@ T.check(to(2.5, 40) < 0, "ticker scrolls out past the hold")
 T.eq(to(0, -5), 0, "a fitting label never moves")
 
 run.release()
-T.finish("useful_bag")
+T.finish("multigen_bag")

@@ -235,6 +235,11 @@ local function wrapCursor(BagMenu, input)
   if not cursor then return false end
   BagMenu.cursor, BagMenu.scroll = cursor, scroll
   playSe("SE_BAG_CURSOR")
+  -- bag_menu.lua cursor_moved: the bag sprite shakes on every cursor move.
+  local shake = BagMenu._shake
+  if shake == nil or (shake.phase == "shake" and (shake.j or 0) >= 13) then
+    BagMenu._shake = { phase = "shake", j = 0, cb = true }
+  end
   return true
 end
 
@@ -277,6 +282,20 @@ local function installPc(mod, Storage)
     return base
   end
   return true
+end
+
+-- Capacity only, at mod load.  Bag.ensure (src/core/game3/bag.lua
+-- sanitize_pockets) re-files an item found in the wrong pocket only while the
+-- target pocket is under ItemsData.CAPACITY, so a save loaded before the raise
+-- could drop such an item from a pocket that is over the cart limit.
+function M.installEarly(mod, req)
+  req = req or require
+  local okI, ItemsData = pcall(req, "src.core.game3.items_data")
+  local okB, Bag = pcall(req, "src.core.game3.bag")
+  if okI and okB and type(ItemsData) == "table" and type(Bag) == "table" then
+    return installCapacity(mod, ItemsData, Bag)
+  end
+  return false
 end
 
 function M.install(mod, req)

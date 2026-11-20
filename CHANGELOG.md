@@ -3,6 +3,18 @@
 MultiGen Bag changes, newest first. Entries before 0.33.0 are from the
 original Useful Bag by Paperboi (ShaneMcGovernIE) and its Gen 1 history.
 
+## [0.35.1] - 2026-11-20
+
+### Fixed
+
+- Gen 2: START sorted the PACK in battle, although sorting is meant to be off
+  there (the SORT menu row already was).
+- Gen 3: bigger pockets are applied when the mod loads, not only once the game
+  is ready, so a save loaded first can't hit the cart limit while the game
+  moves an item that was filed in the wrong pocket.
+- Gen 3 (FRLG / Emerald): wrapping the bag cursor now shakes the bag like a
+  normal cursor move.
+
 ## [0.35.0] - 2026-11-18
 
 ### Changed

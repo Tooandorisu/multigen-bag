@@ -165,6 +165,7 @@ BagMenu._battle = nil
 BagMenu.cursor, BagMenu.scroll = 1, 0
 BagMenu.handleInput(pressing("up"))
 check(BagMenu.cursor == 4 and BagMenu.scroll == 0, "UP on first row wraps to CANCEL")
+check(BagMenu._shake and BagMenu._shake.phase == "shake", "wrap shakes the bag like a native move")
 BagMenu.handleInput(pressing("down"))
 check(BagMenu.cursor == 1, "DOWN on CANCEL wraps to first row")
 BagMenu.handleInput(pressing("down"))

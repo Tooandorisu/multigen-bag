@@ -168,6 +168,7 @@ end
 local function sortPack(pack, Bag, memory, mode)
   local pocket = pack:pocket() and pack:pocket().id
   if not M.SORTABLE[pocket] or pack.tutorial then return false end
+  if pack.inBattle and pack:inBattle() then return false end
   local save = pack.save
   if not (save and save.inventory) then return false end
   local order = Bag.order(save, pack.bagData)
@@ -343,6 +344,14 @@ local function installPc(mod, ItemPc)
     return true
   end
   return true
+end
+
+-- Capacity only, at mod load: Bag is plain data code, and the raise must be
+-- in place before anything (a save load, a script) adds to the PACK.
+function M.installEarly(mod, req)
+  req = req or require
+  local ok, Bag = pcall(req, "src.inventory.Bag")
+  return ok and type(Bag) == "table" and installCapacity(mod, Bag) or false
 end
 
 function M.install(mod, req)

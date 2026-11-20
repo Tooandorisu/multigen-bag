@@ -228,6 +228,15 @@ pack:switchPocket(-1)
 check(pack.pocketId == "BALL", "battle LEFT from ITEM wraps to BALL")
 check(#Pack.submenuRows(pack, "POTION") == 4 and Pack.submenuRows(pack, "POTION")[4] == "quit",
   "no SORT row in battle")
+local battleBefore = table.concat(save.bagOrder, ",")
+pack.pocketId, pack.pocketIndex = "ITEM", 1
+pack.game.input = pressing("start")
+local nativeBefore = pack.nativeUpdates
+Pack.update(pack, 0)
+check(table.concat(save.bagOrder, ",") == battleBefore and pack.nativeUpdates == nativeBefore + 1,
+  "START does not sort in battle")
+pack.game.input = pressing("a")
+pack.pocketId, pack.pocketIndex = "BALL", 2
 local tmPack = setmetatable({ save = save, items = ITEMS, bagData = { items = ITEMS },
   pocketId = "TM_HM", pocketIndex = 4, index = 1, scroll = 0, battle = true,
   game = { input = pressing("a") } }, Pack)

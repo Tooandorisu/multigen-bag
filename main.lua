@@ -72,6 +72,9 @@ if GENERATION == 2 or GENERATION == 3 then
     })
     local source = assert(mod:read(file), "multigen_bag: missing " .. file)
     local half = assert(load(source, "@multigen_bag/" .. file))()
+    -- Bigger pockets at once, so no save load or script add can meet the
+    -- cart limit first; the PACK / BAG screens are hooked at game.ready.
+    if type(half.installEarly) == "function" then pcall(half.installEarly, mod) end
     -- Installed once the game exists, so the engine has loaded its own PACK
     -- / BAG modules first; install is idempotent across new games.
     local status = { generation = GENERATION, pending = true }
